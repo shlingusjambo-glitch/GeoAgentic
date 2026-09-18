@@ -1,0 +1,1029 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GeoAgentic</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            app: {
+              bg: '#f7f7f8',
+              sidebar: '#fcfcfc',
+              border: '#e5e5e7',
+              hover: '#f0f0f2',
+              voice: '#3882f6'
+            }
+          },
+          fontFamily: {
+            sans: ['-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', 'Helvetica', 'Arial', 'sans-serif']
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Highlight.js for Code Syntax -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+  <style>
+    /* Clean custom scrollbars */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
+
+    /* ================= FLOWING BLUE TINT DRIFT ANIMATION ================= */
+    @keyframes blueFlowGlide {
+      0% {
+        opacity: 0;
+        color: #2563eb; /* Vivid Blue */
+        text-shadow: 0 0 10px rgba(37, 99, 235, 0.45);
+        transform: translateX(-8px); /* Tangible left-to-right motion */
+        filter: blur(0.8px);
+      }
+      45% {
+        opacity: 0.9;
+        color: #3b82f6;
+      }
+      100% {
+        opacity: 1;
+        color: inherit;
+        text-shadow: none;
+        transform: translateX(0); /* Lands gently in place */
+        filter: blur(0);
+      }
+    }
+
+    /* inline-block with vertical-align: baseline preserves line-height stability while gliding */
+    .fade-token {
+      display: inline-block;
+      animation: blueFlowGlide 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+      white-space: pre-wrap;
+      vertical-align: baseline;
+      will-change: transform, opacity;
+    }
+
+    /* Working card label shimmer */
+    .shimmer {
+      background: linear-gradient(90deg, #6b7280 0%, #111827 50%, #6b7280 100%);
+      background-size: 200% 100%;
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+      animation: shimmer 1.6s linear infinite;
+    }
+    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+    details.work-card > summary::-webkit-details-marker { display: none; }
+    details.work-card > summary .chev { transition: transform .2s; }
+    details.work-card[open] > summary .chev { transform: rotate(90deg); }
+
+    /* Voice pulse */
+    .voice-pulse {
+      animation: pulseOrb 2.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+    @keyframes pulseOrb {
+      0%, 100% { transform: scale(1); opacity: 0.9; }
+      50% { transform: scale(1.15); opacity: 0.4; }
+    }
+  </style>
+</head>
+
+<body class="bg-app-bg text-neutral-900 flex h-screen overflow-hidden antialiased font-sans">
+
+  <!-- Hidden File Input for Attachments -->
+  <input type="file" id="file-uploader" class="hidden" multiple>
+
+  <!-- ================= SIDEBAR ================= -->
+  <aside id="sidebar" class="w-[260px] bg-app-sidebar flex-shrink-0 flex flex-col border-r border-app-border transition-all duration-300 z-30 fixed inset-y-0 -translate-x-full md:relative md:translate-x-0 select-none">
+    
+    <!-- Top Header -->
+    <div class="h-14 flex items-center justify-between px-4">
+      <span class="font-semibold text-base text-neutral-900 tracking-tight">GeoAgentic</span>
+      <div class="flex items-center gap-1 text-neutral-500">
+        <button id="search-btn" class="p-1.5 hover:bg-app-hover rounded-lg transition" title="Search chats (Ctrl+K)">
+          <i data-lucide="search" class="w-4 h-4"></i>
+        </button>
+        <button id="close-sidebar-btn" class="p-1.5 hover:bg-app-hover rounded-lg transition" title="Close sidebar">
+          <i data-lucide="panel-left-close" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- Quick Navigation Actions -->
+    <div class="px-2 space-y-0.5 text-sm">
+      <button onclick="createNewChat()" class="w-full flex items-center gap-3 px-3 py-2 rounded-xl bg-app-hover hover:bg-neutral-200/80 font-medium text-neutral-900 transition group">
+        <i data-lucide="square-pen" class="w-4 h-4 text-neutral-700"></i>
+        <span>New chat</span>
+      </button>
+    </div>
+
+    <!-- Real Recents List -->
+    <div class="flex-1 overflow-y-auto mt-4 px-2 flex flex-col">
+      <div class="px-3 py-1.5 text-xs font-semibold text-neutral-400 tracking-wider">Recents</div>
+      <div class="space-y-0.5 text-sm flex-1" id="recents-list"></div>
+      <div id="no-chats-msg" class="hidden px-3 py-6 text-center text-xs text-neutral-400">
+        No recent chats yet.
+      </div>
+    </div>
+
+    <!-- Real Profile Bottom -->
+    <div class="p-3 border-t border-app-border">
+      <button id="profile-settings-btn" class="w-full flex items-center justify-between p-1.5 rounded-xl hover:bg-app-hover transition text-left group">
+        <div class="flex items-center gap-2.5 overflow-hidden">
+          <div id="profile-avatar" class="w-8 h-8 rounded-full bg-emerald-600 text-white font-semibold text-xs flex items-center justify-center flex-shrink-0">
+            U
+          </div>
+          <div class="truncate leading-tight">
+            <div id="profile-name-display" class="font-medium text-xs text-neutral-900 truncate">User</div>
+            <div id="profile-plan-display" class="text-[11px] text-neutral-400 truncate">Settings</div>
+          </div>
+        </div>
+        <i data-lucide="sliders-horizontal" class="w-3.5 h-3.5 text-neutral-400 group-hover:text-neutral-700 transition"></i>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ================= MAIN VIEW ================= -->
+  <main class="flex-1 flex flex-col h-full relative overflow-hidden bg-app-bg">
+    
+    <!-- Top Bar -->
+    <header class="h-14 flex items-center justify-between px-4 z-10 border-b border-app-border/40">
+      <div class="flex items-center">
+        <button id="mobile-menu-btn" class="md:hidden p-1.5 text-neutral-600 hover:bg-neutral-200 rounded-lg mr-2">
+          <i data-lucide="menu" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <!-- Agent status -->
+      <div id="agent-status" class="bg-neutral-200/80 px-3 py-1 rounded-full flex items-center gap-2 text-xs font-medium border border-neutral-300/40 shadow-inner text-neutral-600">
+        <img src="static/arrow.png" class="h-4">
+        <span id="agent-status-text">Idle</span>
+      </div>
+
+      <div class="flex items-center gap-1">
+        <button onclick="createNewChat()" class="p-1.5 text-neutral-500 hover:text-neutral-800 hover:bg-neutral-200/60 rounded-full transition" title="Start fresh conversation">
+          <i data-lucide="rotate-cw" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Scrollable Messages Container -->
+    <div id="scroll-area" class="flex-1 overflow-y-auto px-4">
+      
+      <!-- Landing View -->
+      <div id="landing-hero" class="max-w-2xl mx-auto min-h-[calc(100vh-14rem)] flex flex-col justify-center items-center">
+        <h1 class="text-2xl md:text-[28px] font-medium text-neutral-900 tracking-normal mb-8 text-center" id="hero-heading">
+          What should I do on your Mac?
+        </h1>
+
+        <!-- Centered Pill Input -->
+        <div class="w-full relative shadow-[0_4px_20px_rgba(0,0,0,0.06)] rounded-full bg-white border border-neutral-200 transition-all focus-within:border-neutral-400">
+          
+          <div id="attachment-tray" class="hidden px-4 pt-2.5 flex items-center gap-2 overflow-x-auto"></div>
+
+          <div class="flex items-center px-3.5 py-2.5">
+            <button onclick="triggerFileInput()" class="p-1.5 text-neutral-500 hover:text-neutral-800 hover:bg-neutral-100 rounded-full transition mr-1" title="Attach files">
+              <i data-lucide="plus" class="w-5 h-5"></i>
+            </button>
+
+            <input 
+              type="text" 
+              id="prompt-input" 
+              placeholder="Tell GeoAgentic what to do on your Mac" 
+              class="w-full bg-transparent text-neutral-900 placeholder-neutral-400 text-base focus:outline-none px-1"
+            />
+
+            <div class="relative flex items-center">
+              <div class="relative">
+                <button id="model-toggle-btn" class="flex items-center gap-1 text-xs text-neutral-600 hover:text-neutral-900 px-2 py-1 hover:bg-neutral-100 rounded-md transition font-medium mr-1">
+                  <span id="selected-model-text">model</span>
+                  <i data-lucide="chevron-down" class="w-3.5 h-3.5 text-neutral-400"></i>
+                </button>
+                <div id="model-dropdown-menu" class="hidden absolute right-0 top-8 w-52 bg-white border border-neutral-200 rounded-xl shadow-lg p-1 z-50 text-xs"></div>
+              </div>
+
+              <button id="mic-btn" onclick="toggleSpeechRecognition()" class="p-2 text-neutral-500 hover:text-neutral-800 hover:bg-neutral-100 rounded-full transition mr-1" title="Voice dictation">
+                <i data-lucide="mic" class="w-4 h-4"></i>
+              </button>
+
+              <button onclick="openVoiceMode()" class="voice-btn w-8 h-8 rounded-full bg-app-voice hover:bg-blue-600 text-white flex items-center justify-center shadow-md transition" title="Start voice mode">
+                <i data-lucide="audio-waveform" class="w-4 h-4"></i>
+              </button>
+              <button onclick="stopAgent()" class="stop-btn hidden w-8 h-8 rounded-full bg-red-600 hover:bg-red-500 text-white items-center justify-center shadow-md transition" title="Stop the agent">
+                <i data-lucide="square" class="w-3.5 h-3.5 fill-current"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Suggestion List -->
+        <div class="w-full max-w-xl mt-8 space-y-3">
+          <button onclick="submitPrompt('Open Notes and write a note titled Groceries with milk, eggs and bread')" class="w-full flex items-center gap-3.5 text-left text-sm text-neutral-700 hover:text-neutral-900 transition py-1 group">
+            <span class="text-lg">📝</span>
+            <span class="group-hover:translate-x-0.5 transition-transform duration-150">Open Notes and write a note titled Groceries with milk, eggs and bread</span>
+          </button>
+          <button onclick="submitPrompt('Open Chrome, search for the weather in my city and tell me the forecast')" class="w-full flex items-center gap-3.5 text-left text-sm text-neutral-700 hover:text-neutral-900 transition py-1 group">
+            <span class="text-lg">🌐</span>
+            <span class="group-hover:translate-x-0.5 transition-transform duration-150">Open Chrome, search for the weather in my city and tell me the forecast</span>
+          </button>
+          <button onclick="submitPrompt('Install VS Code with Homebrew and open it')" class="w-full flex items-center gap-3.5 text-left text-sm text-neutral-700 hover:text-neutral-900 transition py-1 group">
+            <span class="text-lg">📦</span>
+            <span class="group-hover:translate-x-0.5 transition-transform duration-150">Install VS Code with Homebrew and open it</span>
+          </button>
+        </div>
+
+      </div>
+
+      <!-- Active Conversation Stream -->
+      <div id="messages-stream" class="max-w-2xl mx-auto py-8 space-y-6 hidden"></div>
+
+    </div>
+
+    <!-- Bottom Docked Bar -->
+    <div id="bottom-input-bar" class="p-4 hidden bg-gradient-to-t from-app-bg via-app-bg to-transparent">
+      <div class="max-w-2xl mx-auto relative shadow-[0_4px_20px_rgba(0,0,0,0.06)] rounded-full bg-white border border-neutral-200">
+        
+        <div id="bottom-attachment-tray" class="hidden px-4 pt-2 flex items-center gap-2 overflow-x-auto"></div>
+
+        <div class="flex items-center px-3.5 py-2.5">
+          <button onclick="triggerFileInput()" class="p-1.5 text-neutral-500 hover:text-neutral-800 rounded-full transition mr-1">
+            <i data-lucide="plus" class="w-5 h-5"></i>
+          </button>
+
+          <input 
+            type="text" 
+            id="bottom-prompt-input" 
+            placeholder="Tell GeoAgentic what to do next" 
+            class="w-full bg-transparent text-neutral-900 placeholder-neutral-400 text-sm focus:outline-none px-1"
+          />
+
+          <div class="flex items-center gap-1">
+            <button onclick="toggleSpeechRecognition()" class="p-1.5 text-neutral-500 hover:text-neutral-800 rounded-full transition" title="Voice dictation">
+              <i data-lucide="mic" class="w-4 h-4"></i>
+            </button>
+            <button onclick="openVoiceMode()" class="voice-btn w-7 h-7 rounded-full bg-app-voice hover:bg-blue-600 text-white flex items-center justify-center shadow transition" title="Voice mode">
+              <i data-lucide="audio-waveform" class="w-3.5 h-3.5"></i>
+            </button>
+            <button onclick="stopAgent()" class="stop-btn hidden w-7 h-7 rounded-full bg-red-600 hover:bg-red-500 text-white items-center justify-center shadow transition" title="Stop the agent">
+              <i data-lucide="square" class="w-3 h-3 fill-current"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ================= VOICE MODE MODAL ================= -->
+  <div id="voice-modal" class="fixed inset-0 bg-neutral-950/90 backdrop-blur-md hidden flex-col items-center justify-between z-50 p-8 text-white">
+    <div class="w-full flex justify-between items-center max-w-xl">
+      <span class="text-xs font-semibold tracking-wider text-neutral-400 uppercase">Voice Inferencing Session</span>
+      <button onclick="closeVoiceMode()" class="p-2 rounded-full hover:bg-white/10 text-neutral-300 hover:text-white">
+        <i data-lucide="x" class="w-5 h-5"></i>
+      </button>
+    </div>
+
+    <div class="flex flex-col items-center justify-center space-y-6">
+      <div class="relative flex items-center justify-center">
+        <div class="w-48 h-48 rounded-full bg-blue-500/25 voice-pulse absolute"></div>
+        <div class="w-32 h-32 rounded-full bg-gradient-to-tr from-sky-400 via-blue-500 to-indigo-600 shadow-2xl flex items-center justify-center">
+          <i data-lucide="audio-waveform" class="w-10 h-10 text-white"></i>
+        </div>
+      </div>
+      <p id="voice-status-text" class="text-sm font-medium text-neutral-300">Speak now, listening...</p>
+    </div>
+
+    <div class="flex items-center gap-4">
+      <button onclick="closeVoiceMode()" class="px-6 py-2.5 rounded-full bg-red-600 hover:bg-red-500 font-medium text-sm transition">
+        End Voice
+      </button>
+    </div>
+  </div>
+
+  <!-- ================= SEARCH MODAL ================= -->
+  <div id="search-modal" class="fixed inset-0 bg-black/40 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="bg-white border border-neutral-200 rounded-2xl w-full max-w-lg p-4 space-y-3 shadow-2xl">
+      <div class="flex items-center gap-2 border-b border-neutral-200 pb-2">
+        <i data-lucide="search" class="w-4 h-4 text-neutral-400"></i>
+        <input type="text" id="search-input" placeholder="Search your previous chats..." class="w-full text-sm outline-none bg-transparent">
+        <button onclick="closeSearch()" class="text-neutral-400 hover:text-neutral-700 text-xs font-semibold">ESC</button>
+      </div>
+      <div id="search-results-list" class="max-h-60 overflow-y-auto space-y-1 text-sm"></div>
+    </div>
+  </div>
+
+  <!-- ================= USER SETTINGS & API MODAL ================= -->
+  <div id="settings-modal" class="fixed inset-0 bg-black/40 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="bg-white border border-neutral-200 rounded-2xl w-full max-w-md p-6 space-y-4 shadow-xl">
+      <div class="flex justify-between items-center">
+        <h3 class="font-semibold text-base text-neutral-900">Settings & Backend</h3>
+        <button onclick="closeSettings()" class="text-neutral-400 hover:text-neutral-700">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <div class="space-y-3 text-sm">
+        <div>
+          <label class="block text-xs font-semibold text-neutral-600 mb-1">Your Name</label>
+          <input type="text" id="setting-name" class="w-full bg-neutral-100 border border-neutral-300 rounded-lg p-2 text-neutral-800 text-xs focus:outline-none">
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold text-neutral-600 mb-1">Vision model (only used for rare screenshots)</label>
+          <input type="text" id="setting-vision" placeholder="moondream" class="w-full bg-neutral-100 border border-neutral-300 rounded-lg p-2 text-neutral-800 text-xs font-mono focus:outline-none">
+          <p class="text-[11px] text-neutral-400 mt-1">Ollama at localhost:11434. Agent model is picked in the input bar. Grant Accessibility + Screen Recording to Terminal/python for clicks and screenshots.</p>
+        </div>
+
+        <div class="pt-2 border-t border-neutral-200">
+          <button onclick="clearAllConversations()" class="text-xs text-red-600 hover:text-red-700 font-medium flex items-center gap-1.5">
+            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+            <span>Clear all stored chat history</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="saveSettings()" class="px-4 py-2 bg-neutral-900 hover:bg-neutral-800 text-white rounded-lg text-xs font-medium transition">Save Changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= APPLICATION JAVASCRIPT ================= -->
+  <script>
+    lucide.createIcons();
+
+    let chats = JSON.parse(localStorage.getItem('cg_chats') || '[]');
+    let currentChatId = null;
+    let currentMode = 'chat';
+    let selectedModel = localStorage.getItem('cg_model') || '';
+    let attachedFiles = [];
+    let isGenerating = false;
+    let speechRecognitionInstance = null;
+
+    let profile = JSON.parse(localStorage.getItem('cg_profile') || JSON.stringify({
+      name: 'User',
+      vision: 'moondream'
+    }));
+
+    const landingHero = document.getElementById('landing-hero');
+    const messagesStream = document.getElementById('messages-stream');
+    const bottomInputBar = document.getElementById('bottom-input-bar');
+    const promptInput = document.getElementById('prompt-input');
+    const bottomPromptInput = document.getElementById('bottom-prompt-input');
+    const scrollArea = document.getElementById('scroll-area');
+    const recentsList = document.getElementById('recents-list');
+    const noChatsMsg = document.getElementById('no-chats-msg');
+    const fileUploader = document.getElementById('file-uploader');
+
+    updateProfileUI();
+    renderRecentsList();
+
+    const modelToggleBtn = document.getElementById('model-toggle-btn');
+    const modelDropdownMenu = document.getElementById('model-dropdown-menu');
+    modelToggleBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      modelDropdownMenu.classList.toggle('hidden');
+    });
+    document.addEventListener('click', () => modelDropdownMenu.classList.add('hidden'));
+
+    function selectModel(name) {
+      selectedModel = name;
+      localStorage.setItem('cg_model', name);
+      document.getElementById('selected-model-text').innerText = name.split(':')[0];
+      modelDropdownMenu.classList.add('hidden');
+    }
+    fetch('/api/models').then(r => r.json()).then(d => {
+      const names = (d.models || []).map(m => m.name);
+      modelDropdownMenu.innerHTML = names.map(n => `<button onclick="selectModel('${n}')" class="w-full text-left px-3 py-2 rounded-lg hover:bg-neutral-100 font-medium text-neutral-800 font-mono">${n}</button>`).join('') || '<div class="p-2 text-neutral-400">Ollama not running</div>';
+      if (!names.includes(selectedModel)) selectModel(names.find(n => !/moondream|llava|gpt2/.test(n)) || names[0] || '');
+    });
+    let abortCtl = null;
+    function stopAgent() { if (abortCtl) abortCtl.abort(); }
+    function setRunning(on) {
+      document.querySelectorAll('.voice-btn').forEach(b => b.classList.toggle('hidden', on));
+      document.querySelectorAll('.stop-btn').forEach(b => { b.classList.toggle('hidden', !on); b.classList.toggle('flex', on); });
+    }
+    function createWorkCard(container) {
+      const d = document.createElement('details');
+      d.className = 'work-card fade-token w-full rounded-xl border border-neutral-200 bg-white/80 my-1';
+      d.open = true;
+      d.innerHTML = `
+        <summary class="cursor-pointer select-none px-3 py-2 flex items-center gap-2 text-xs">
+          <i data-lucide="chevron-right" class="chev w-3.5 h-3.5 text-neutral-400"></i>
+          <span class="work-label shimmer font-medium">Thinking…</span>
+          <span class="work-meta ml-auto text-neutral-400"></span>
+        </summary>
+        <div class="work-body px-3 pb-2 space-y-1"></div>`;
+      container.appendChild(d);
+      lucide.createIcons({ root: d });
+      d._start = Date.now(); d._steps = 0;
+      return d;
+    }
+    function finishWorkCard(card, stopped) {
+      if (!card) return;
+      const secs = Math.max(1, Math.round((Date.now() - card._start) / 1000));
+      const label = card.querySelector('.work-label');
+      label.classList.remove('shimmer'); label.classList.add('text-neutral-500');
+      label.textContent = stopped ? 'Stopped' : (card._steps ? `Worked for ${secs}s` : `Thought for ${secs}s`);
+      card.querySelector('.work-meta').textContent = card._steps ? `${card._steps} step${card._steps > 1 ? 's' : ''}` : '';
+      if (!card.querySelector('.work-body').children.length) card.remove(); else card.open = false;
+    }
+    function setStatus(t, hand) {
+      document.getElementById('agent-status-text').innerText = t;
+      document.querySelector('#agent-status img').src = hand ? 'static/hand.png' : 'static/arrow.png';
+    }
+
+    function triggerFileInput() { fileUploader.click(); }
+    fileUploader.addEventListener('change', (e) => {
+      const files = Array.from(e.target.files);
+      if (!files.length) return;
+      attachedFiles.push(...files);
+      renderAttachmentBadges();
+    });
+
+    function renderAttachmentBadges() {
+      const trays = [document.getElementById('attachment-tray'), document.getElementById('bottom-attachment-tray')];
+      trays.forEach(tray => {
+        if (!tray) return;
+        if (attachedFiles.length === 0) {
+          tray.classList.add('hidden');
+          tray.innerHTML = '';
+          return;
+        }
+        tray.classList.remove('hidden');
+        tray.innerHTML = attachedFiles.map((f, idx) => `
+          <div class="flex items-center gap-1.5 bg-neutral-100 border border-neutral-200 text-xs px-2.5 py-1 rounded-full text-neutral-700">
+            <i data-lucide="file-text" class="w-3.5 h-3.5 text-neutral-500"></i>
+            <span class="max-w-[120px] truncate">${escapeHtml(f.name)}</span>
+            <button onclick="removeAttachment(${idx})" class="hover:text-red-500 ml-1">
+              <i data-lucide="x" class="w-3 h-3"></i>
+            </button>
+          </div>
+        `).join('');
+      });
+      lucide.createIcons();
+    }
+
+    function removeAttachment(idx) {
+      attachedFiles.splice(idx, 1);
+      renderAttachmentBadges();
+    }
+
+    function createNewChat() {
+      currentChatId = null;
+      attachedFiles = [];
+      renderAttachmentBadges();
+      messagesStream.innerHTML = '';
+      messagesStream.classList.add('hidden');
+      bottomInputBar.classList.add('hidden');
+      landingHero.classList.remove('hidden');
+      promptInput.value = '';
+      renderRecentsList();
+    }
+
+    function loadChat(id) {
+      const chat = chats.find(c => c.id === id);
+      if (!chat) return;
+      currentChatId = chat.id;
+
+      landingHero.classList.add('hidden');
+      messagesStream.classList.remove('hidden');
+      bottomInputBar.classList.remove('hidden');
+      messagesStream.innerHTML = '';
+
+      let loadWork = null;
+      chat.messages.forEach(msg => {
+        if (msg.role === 'user') {
+          if (loadWork) { finishWorkCard(loadWork); loadWork = null; }
+          appendUserBubble(msg.content, msg.files);
+        } else if (msg.role === 'tool') {
+          if (!loadWork) { loadWork = createWorkCard(appendAssistantBubble()); loadWork._steps = 0; }
+          loadWork._steps++;
+          renderToolCard(loadWork.querySelector('.work-body'), msg.name, msg.args, msg.result);
+        } else {
+          if (loadWork) { finishWorkCard(loadWork); loadWork = null; }
+          const el = appendAssistantBubble();
+          renderBlocksInstantly(parseResponseBlocks(msg.content), el);
+        }
+      });
+
+      if (loadWork) finishWorkCard(loadWork);
+      renderRecentsList();
+      scrollArea.scrollTo({ top: scrollArea.scrollHeight, behavior: 'smooth' });
+    }
+
+    function deleteChat(id, e) {
+      e.stopPropagation();
+      chats = chats.filter(c => c.id !== id);
+      saveChats();
+      if (currentChatId === id) {
+        createNewChat();
+      } else {
+        renderRecentsList();
+      }
+    }
+
+    function saveChats() {
+      localStorage.setItem('cg_chats', JSON.stringify(chats));
+    }
+
+    function renderRecentsList() {
+      recentsList.innerHTML = '';
+      if (chats.length === 0) {
+        noChatsMsg.classList.remove('hidden');
+        return;
+      }
+      noChatsMsg.classList.add('hidden');
+
+      chats.slice().reverse().forEach(chat => {
+        const item = document.createElement('div');
+        const isActive = chat.id === currentChatId;
+        item.className = `group flex items-center justify-between px-3 py-1.5 rounded-lg cursor-pointer transition ${isActive ? 'bg-app-hover text-neutral-900 font-medium' : 'text-neutral-700 hover:bg-app-hover'}`;
+        item.onclick = () => loadChat(chat.id);
+
+        item.innerHTML = `
+          <span class="truncate text-xs flex-1">${escapeHtml(chat.title || 'Untitled Chat')}</span>
+          <button class="opacity-0 group-hover:opacity-100 p-1 text-neutral-400 hover:text-red-500 transition" title="Delete chat">
+            <i data-lucide="trash" class="w-3 h-3"></i>
+          </button>
+        `;
+        item.querySelector('button').onclick = (e) => deleteChat(chat.id, e);
+        recentsList.appendChild(item);
+      });
+      lucide.createIcons();
+    }
+
+    promptInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && promptInput.value.trim()) submitPrompt(promptInput.value.trim());
+    });
+    bottomPromptInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && bottomPromptInput.value.trim()) submitPrompt(bottomPromptInput.value.trim());
+    });
+
+    function submitPrompt(text) {
+      if (isGenerating || !text) return;
+
+      landingHero.classList.add('hidden');
+      messagesStream.classList.remove('hidden');
+      bottomInputBar.classList.remove('hidden');
+
+      promptInput.value = '';
+      bottomPromptInput.value = '';
+
+      const fileNames = attachedFiles.map(f => f.name);
+      attachedFiles = [];
+      renderAttachmentBadges();
+
+      if (!currentChatId) {
+        currentChatId = Date.now().toString();
+        chats.push({
+          id: currentChatId,
+          title: text.length > 30 ? text.slice(0, 30) + '...' : text,
+          messages: []
+        });
+      }
+
+      const activeChat = chats.find(c => c.id === currentChatId);
+      activeChat.messages.push({ role: 'user', content: text, files: fileNames });
+      saveChats();
+      renderRecentsList();
+
+      appendUserBubble(text, fileNames);
+      const assistantContainer = appendAssistantBubble();
+      generateResponse(text, assistantContainer, activeChat);
+    }
+
+    function appendUserBubble(text, files = []) {
+      const msg = document.createElement('div');
+      msg.className = 'flex flex-col items-end gap-1.5';
+      
+      let filesHtml = '';
+      if (files && files.length > 0) {
+        filesHtml = `<div class="flex gap-1 mb-1 flex-wrap justify-end">` + 
+          files.map(f => `<span class="bg-neutral-100 text-neutral-600 text-[11px] px-2 py-0.5 rounded border border-neutral-200">📎 ${escapeHtml(f)}</span>`).join('') +
+          `</div>`;
+      }
+
+      msg.innerHTML = `
+        ${filesHtml}
+        <div class="bg-neutral-200/70 text-neutral-900 px-4 py-2.5 rounded-2xl max-w-[80%] text-[15px] leading-relaxed">
+          ${escapeHtml(text)}
+        </div>
+      `;
+      messagesStream.appendChild(msg);
+      scrollArea.scrollTo({ top: scrollArea.scrollHeight, behavior: 'smooth' });
+    }
+
+    function appendAssistantBubble() {
+      const msg = document.createElement('div');
+      msg.className = 'flex gap-3 text-neutral-900 text-[15px] leading-relaxed';
+      msg.innerHTML = `<div class="w-full space-y-3 message-body"></div>`;
+      messagesStream.appendChild(msg);
+      scrollArea.scrollTo({ top: scrollArea.scrollHeight, behavior: 'smooth' });
+      return msg.querySelector('.message-body');
+    }
+
+    // ================= BLOCK PARSER =================
+    function parseResponseBlocks(text) {
+      const lines = text.split('\n');
+      const blocks = [];
+      let currentP = null;
+      let inCode = false;
+      let codeLang = '';
+      let codeLines = [];
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.trim().startsWith('```')) {
+          if (!inCode) {
+            inCode = true;
+            codeLang = line.trim().slice(3).trim() || 'javascript';
+            codeLines = [];
+          } else {
+            inCode = false;
+            blocks.push({ type: 'code', lang: codeLang, content: codeLines.join('\n') });
+            codeLines = [];
+          }
+        } else if (inCode) {
+          codeLines.push(line);
+        } else {
+          if (!line.trim()) {
+            if (currentP) {
+              blocks.push(currentP);
+              currentP = null;
+            }
+          } else {
+            if (!currentP) {
+              currentP = { type: 'p', text: line };
+            } else {
+              currentP.text += '\n' + line;
+            }
+          }
+        }
+      }
+      if (currentP) blocks.push(currentP);
+      if (inCode && codeLines.length) blocks.push({ type: 'code', lang: codeLang, content: codeLines.join('\n') });
+      return blocks;
+    }
+
+    // ================= AGENT STREAM (NDJSON from server.py) =================
+    async function streamText(text, container) {
+      for (const block of parseResponseBlocks(text)) {
+        if (block.type === 'p') {
+          const p = document.createElement('p');
+          p.className = 'text-[15px] leading-relaxed text-neutral-800 mb-2';
+          container.appendChild(p);
+          for (const token of block.text.split(/(\s+)/)) {
+            if (!token) continue;
+            const span = document.createElement('span');
+            span.className = 'fade-token';
+            span.textContent = token;
+            p.appendChild(span);
+            scrollArea.scrollTo({ top: scrollArea.scrollHeight });
+            await new Promise(r => setTimeout(r, 16));
+          }
+        } else {
+          const codeWrapper = createCodeCardElement(block.lang);
+          container.appendChild(codeWrapper);
+          const codeEl = codeWrapper.querySelector('code');
+          for (const line of block.content.split('\n')) {
+            const lineDiv = document.createElement('div');
+            lineDiv.className = 'fade-token font-mono block';
+            lineDiv.textContent = line || ' ';
+            codeEl.appendChild(lineDiv);
+            scrollArea.scrollTo({ top: scrollArea.scrollHeight });
+            await new Promise(r => setTimeout(r, 20));
+          }
+          hljs.highlightElement(codeEl);
+        }
+      }
+    }
+
+    function renderToolCard(container, name, args, result) {
+      const card = document.createElement('details');
+      card.className = 'fade-token w-full rounded-xl border border-neutral-200 bg-white text-xs my-1';
+      const argStr = Object.entries(args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ');
+      card.innerHTML = `
+        <summary class="cursor-pointer select-none px-3 py-2 flex items-center gap-2 text-neutral-700">
+          <i data-lucide="${/click|move|type|press|scroll/.test(name) ? 'mouse-pointer-click' : /browser/.test(name) ? 'globe' : /file/.test(name) ? 'file-text' : /screenshot/.test(name) ? 'camera' : 'terminal'}" class="w-3.5 h-3.5 text-neutral-400"></i>
+          <span class="font-semibold font-mono">${escapeHtml(name)}</span>
+          <span class="truncate text-neutral-400 font-mono flex-1">${escapeHtml(argStr).slice(0, 140)}</span>
+          <span class="tool-state text-neutral-400">${result === undefined ? 'running…' : ''}</span>
+        </summary>
+        <pre class="tool-result px-3 pb-3 whitespace-pre-wrap text-[11px] text-neutral-600 max-h-64 overflow-auto font-mono">${escapeHtml(result || '')}</pre>`;
+      container.appendChild(card);
+      lucide.createIcons({ root: card });
+      scrollArea.scrollTo({ top: scrollArea.scrollHeight });
+      return card;
+    }
+
+    async function generateResponse(prompt, container, activeChat) {
+      isGenerating = true;
+      setStatus('Thinking…'); setRunning(true);
+      const history = activeChat.messages.filter(m => m.role !== 'tool').map(m => ({ role: m.role, content: m.content }));
+      let pendingCard = null, work = createWorkCard(container), stopped = false;
+      abortCtl = new AbortController();
+      try {
+        const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: abortCtl.signal,
+          body: JSON.stringify({ messages: history, cfg: { model: selectedModel, vision_model: profile.vision } }) });
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let nl;
+          while ((nl = buf.indexOf('\n')) >= 0) {
+            const ev = JSON.parse(buf.slice(0, nl)); buf = buf.slice(nl + 1);
+            if (ev.type === 'text') {
+              finishWorkCard(work); work = null;
+              await streamText(ev.content, container);
+              activeChat.messages.push({ role: 'assistant', content: ev.content });
+            } else if (ev.type === 'thinking') {
+              const t = document.createElement('div');
+              t.className = 'fade-token text-[11px] text-neutral-500 italic whitespace-pre-wrap';
+              t.textContent = ev.content.trim().slice(0, 1200);
+              work.querySelector('.work-body').appendChild(t);
+            } else if (ev.type === 'tool') {
+              work._steps++;
+              work.querySelector('.work-label').textContent = ev.name.replace(/_/g, ' ') + '…';
+              setStatus(ev.name.replace('_', ' ') + (ev.args.x !== undefined ? ` @${ev.args.x},${ev.args.y}` : ''), /click|type|press/.test(ev.name));
+              pendingCard = renderToolCard(work.querySelector('.work-body'), ev.name, ev.args);
+              pendingCard._args = ev.args;
+            } else if (ev.type === 'result' && pendingCard) {
+              pendingCard.querySelector('.tool-state').textContent = '';
+              pendingCard.querySelector('.tool-result').textContent = ev.result;
+              activeChat.messages.push({ role: 'tool', name: ev.name, args: pendingCard._args, result: ev.result });
+              work.querySelector('.work-label').textContent = 'Thinking…';
+              setStatus('Thinking…');
+            }
+            saveChats();
+          }
+        }
+      } catch (e) {
+        if (e.name === 'AbortError') stopped = true;
+        else await streamText('Error: ' + e.message + ' — is server.py running?', container);
+      }
+      finishWorkCard(work, stopped);
+      abortCtl = null; setRunning(false);
+      setStatus('Idle');
+      isGenerating = false;
+    }
+
+    function renderBlocksInstantly(blocks, container) {
+      container.innerHTML = '';
+      blocks.forEach(block => {
+        if (block.type === 'p') {
+          const p = document.createElement('p');
+          p.className = 'text-[15px] leading-relaxed text-neutral-800 mb-2';
+          p.innerHTML = formatInlineMarkdown(block.text);
+          container.appendChild(p);
+        } else if (block.type === 'code') {
+          const codeCard = createCodeCardElement(block.lang);
+          const codeEl = codeCard.querySelector('code');
+          codeEl.textContent = block.content;
+          container.appendChild(codeCard);
+          hljs.highlightElement(codeEl);
+        }
+      });
+    }
+
+    function formatInlineMarkdown(text) {
+      return escapeHtml(text)
+        .replace(/\*\*(.*?)\*\*/g, '<strong class="font-semibold text-neutral-900">$1</strong>')
+        .replace(/`([^`]+)`/g, '<code class="bg-neutral-200/60 text-neutral-800 px-1 py-0.5 rounded text-xs font-mono">$1</code>')
+        .replace(/\n/g, '<br>');
+    }
+
+    // ================= CHATGPT SIGNATURE CODE BLOCK =================
+    function createCodeCardElement(lang) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'my-4 rounded-xl overflow-hidden border border-neutral-800/80 bg-[#18181c] shadow-sm select-text';
+
+      wrapper.innerHTML = `
+        <div class="flex items-center justify-between px-4 py-2 bg-[#26262c] text-neutral-400 text-xs font-mono select-none border-b border-neutral-800/60">
+          <span class="lowercase font-sans text-xs tracking-wide text-neutral-400">${escapeHtml(lang || 'code')}</span>
+          <button onclick="handleCopyCode(this)" class="copy-trigger flex items-center gap-1.5 py-1 px-2.5 rounded-md hover:bg-neutral-700/50 text-neutral-300 hover:text-white transition text-xs font-sans">
+            <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+            <span class="copy-label">Copy code</span>
+          </button>
+        </div>
+        <pre class="p-4 text-[13.5px] font-mono text-zinc-100 overflow-x-auto leading-relaxed m-0 bg-[#18181c]"><code class="language-${escapeHtml(lang)}"></code></pre>
+      `;
+
+      lucide.createIcons({ root: wrapper });
+      return wrapper;
+    }
+
+    function handleCopyCode(btn) {
+      const wrapper = btn.closest('div').parentElement;
+      const code = wrapper.querySelector('code').innerText;
+      navigator.clipboard.writeText(code);
+
+      btn.classList.add('text-emerald-400');
+      btn.innerHTML = `
+        <svg class="w-3.5 h-3.5 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"></polyline>
+        </svg>
+        <span>Copied!</span>
+      `;
+
+      setTimeout(() => {
+        btn.classList.remove('text-emerald-400');
+        btn.innerHTML = `
+          <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+            <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+          </svg>
+          <span class="copy-label">Copy code</span>
+        `;
+      }, 1800);
+    }
+
+    function escapeHtml(str) {
+      return (str || '').replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    // Speech Recognition
+    function toggleSpeechRecognition() {
+      const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRec) {
+        alert("Speech recognition is not supported in this browser. Please use Google Chrome or Edge.");
+        return;
+      }
+      if (speechRecognitionInstance) {
+        speechRecognitionInstance.stop();
+        speechRecognitionInstance = null;
+        return;
+      }
+      speechRecognitionInstance = new SpeechRec();
+      speechRecognitionInstance.lang = 'en-US';
+      speechRecognitionInstance.onstart = () => {
+        promptInput.placeholder = "Listening...";
+        bottomPromptInput.placeholder = "Listening...";
+      };
+      speechRecognitionInstance.onresult = (e) => {
+        const text = e.results[0][0].transcript;
+        promptInput.value = text;
+        bottomPromptInput.value = text;
+      };
+      speechRecognitionInstance.onend = () => {
+        promptInput.placeholder = "Tell GeoAgentic what to do";
+        bottomPromptInput.placeholder = "Tell GeoAgentic what to do";
+        speechRecognitionInstance = null;
+      };
+      speechRecognitionInstance.start();
+    }
+
+    // Voice Mode
+    const voiceModal = document.getElementById('voice-modal');
+    const voiceStatusText = document.getElementById('voice-status-text');
+    let voiceActive = false;
+
+    function openVoiceMode() {
+      voiceModal.classList.remove('hidden');
+      voiceModal.classList.add('flex');
+      voiceActive = true;
+      runVoiceLoop();
+    }
+
+    function closeVoiceMode() {
+      voiceModal.classList.add('hidden');
+      voiceModal.classList.remove('flex');
+      voiceActive = false;
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+      if (speechRecognitionInstance) speechRecognitionInstance.stop();
+    }
+
+    function runVoiceLoop() {
+      const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRec || !voiceActive) return;
+
+      const rec = new SpeechRec();
+      rec.lang = 'en-US';
+      voiceStatusText.innerText = "Listening...";
+
+      rec.onresult = (e) => {
+        const q = e.results[0][0].transcript;
+        voiceStatusText.innerText = `You: "${q}"`;
+        submitPrompt(q);
+        const poll = setInterval(() => {
+          if (isGenerating || !voiceActive) return;
+          clearInterval(poll);
+          const chat = chats.find(c => c.id === currentChatId);
+          const last = [...chat.messages].reverse().find(m => m.role === 'assistant');
+          const reply = last ? last.content.slice(0, 400) : 'Done.';
+          voiceStatusText.innerText = reply;
+          const u = new SpeechSynthesisUtterance(reply);
+          u.onend = () => { if (voiceActive) runVoiceLoop(); };
+          window.speechSynthesis.speak(u);
+        }, 500);
+      };
+
+      rec.onerror = () => { if (voiceActive) setTimeout(runVoiceLoop, 1000); };
+      rec.start();
+    }
+
+    // Search Modal
+    const searchModal = document.getElementById('search-modal');
+    const searchInput = document.getElementById('search-input');
+    const searchResultsList = document.getElementById('search-results-list');
+    document.getElementById('search-btn').onclick = openSearch;
+
+    window.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        openSearch();
+      }
+      if (e.key === 'Escape') {
+        closeSearch();
+        closeSettings();
+      }
+    });
+
+    function openSearch() {
+      searchModal.classList.remove('hidden');
+      searchModal.classList.add('flex');
+      searchInput.value = '';
+      searchInput.focus();
+      filterChats('');
+    }
+
+    function closeSearch() {
+      searchModal.classList.add('hidden');
+      searchModal.classList.remove('flex');
+    }
+
+    searchInput.addEventListener('input', (e) => filterChats(e.target.value));
+
+    function filterChats(query) {
+      searchResultsList.innerHTML = '';
+      const matched = chats.filter(c => (c.title || '').toLowerCase().includes(query.toLowerCase()));
+      if (matched.length === 0) {
+        searchResultsList.innerHTML = `<div class="p-3 text-xs text-neutral-400 text-center">No matching conversations.</div>`;
+        return;
+      }
+      matched.forEach(chat => {
+        const item = document.createElement('div');
+        item.className = 'p-2 rounded-lg hover:bg-neutral-100 cursor-pointer flex items-center justify-between text-xs';
+        item.innerHTML = `<span>${escapeHtml(chat.title)}</span><i data-lucide="arrow-right" class="w-3.5 h-3.5 text-neutral-400"></i>`;
+        item.onclick = () => {
+          loadChat(chat.id);
+          closeSearch();
+        };
+        searchResultsList.appendChild(item);
+      });
+      lucide.createIcons();
+    }
+
+    // Profile & Settings
+    const settingsModal = document.getElementById('settings-modal');
+    document.getElementById('profile-settings-btn').onclick = openSettings;
+
+    function openSettings() {
+      document.getElementById('setting-name').value = profile.name;
+      document.getElementById('setting-vision').value = profile.vision || 'moondream';
+      settingsModal.classList.remove('hidden');
+      settingsModal.classList.add('flex');
+    }
+
+    function closeSettings() {
+      settingsModal.classList.add('hidden');
+      settingsModal.classList.remove('flex');
+    }
+
+    function saveSettings() {
+      profile.name = document.getElementById('setting-name').value.trim() || 'User';
+      profile.vision = document.getElementById('setting-vision').value.trim() || 'moondream';
+      localStorage.setItem('cg_profile', JSON.stringify(profile));
+      updateProfileUI();
+      closeSettings();
+    }
+
+    function clearAllConversations() {
+      if (confirm("Are you sure you want to delete all stored chats?")) {
+        chats = [];
+        saveChats();
+        createNewChat();
+        closeSettings();
+      }
+    }
+
+    function updateProfileUI() {
+      document.getElementById('profile-name-display').innerText = profile.name;
+      document.getElementById('profile-avatar').innerText = profile.name.slice(0, 1).toUpperCase();
+    }
+
+    document.getElementById('mobile-menu-btn').onclick = () => document.getElementById('sidebar').classList.toggle('-translate-x-full');
+    document.getElementById('close-sidebar-btn').onclick = () => document.getElementById('sidebar').classList.add('-translate-x-full');
+  </script>
+</body>
+</html>
