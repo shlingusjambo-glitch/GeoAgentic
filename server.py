@@ -454,8 +454,16 @@ def ollama(path, body):
     except urllib.error.HTTPError as e:
         raise RuntimeError(e.read().decode(errors="replace")[:300])
 
-def chat_stream(body, on_text):
-    """Streaming /api/chat: returns the assembled message. on_text gets content deltas as they arrive."""
+# Reasoning effort -> thinking budget in characters (~4 chars per token). Ollama's `think` is only on/off for
+# most models, so the budget is enforced here: past it the stream is cut and the model is made to act.
+REASONING = {"none": 0, "low": 800, "medium": 2000, "high": 5000, "extra": 10000, "max": 20000, "ultra": None}
+
+class ThinkBudget(Exception):
+    def __init__(self, thinking): self.thinking = thinking
+
+def chat_stream(body, on_text, think_budget=None):
+    """Streaming /api/chat: returns the assembled message. on_text gets content deltas as they arrive.
+    Raises ThinkBudget (carrying the partial thinking) when the model thinks past think_budget chars."""
     body = dict(body, stream=True)
     req = urllib.request.Request(OLLAMA + "/api/chat", json.dumps(body).encode(), {"Content-Type": "application/json"})
     msg = {"role": "assistant", "content": "", "tool_calls": [], "thinking": ""}
@@ -466,7 +474,10 @@ def chat_stream(body, on_text):
                 if d.get("error"): raise RuntimeError(d["error"])
                 m = d.get("message", {})
                 if m.get("content"): msg["content"] += m["content"]; on_text(m["content"])
-                if m.get("thinking"): msg["thinking"] += m["thinking"]
+                if m.get("thinking"):
+                    msg["thinking"] += m["thinking"]
+                    if think_budget is not None and len(msg["thinking"]) > think_budget and not msg["content"] and not msg["tool_calls"]:
+                        r.close(); raise ThinkBudget(msg["thinking"])  # closing the socket stops generation
                 if m.get("tool_calls"): msg["tool_calls"] += m["tool_calls"]
                 if d.get("done"): msg["done_reason"] = d.get("done_reason"); break
     except urllib.error.HTTPError as e:
@@ -512,7 +523,9 @@ def agent(messages, cfg, emit):
     prompt_tools = cfg["model"] in NO_TOOLS
     msgs = [{"role": "system", "content": SYSTEM + (PROMPT_TOOLS if prompt_tools else "")}] + messages
     task = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-    think = bool(cfg.get("think", False)); acted = False; nudges = 0; verified = False
+    level = str(cfg.get("reasoning") or ("medium" if cfg.get("think") else "none")).lower()
+    budget = REASONING.get(level, 2000)
+    think = level != "none"; acted = False; nudges = 0; verified = False
     last_call = None; same_reads = 0; done_calls = {}  # (name, args) -> result, for side-effecting tools
     for _ in range(MAX_STEPS):
         if sum(len(m.get("content") or "") for m in msgs) > 24000:  # only then; rewriting history defeats the prefix cache
@@ -528,7 +541,16 @@ def agent(messages, cfg, emit):
         if not prompt_tools: body["tools"] = TOOLS
         t0 = time.time()
         try:
-            m = chat_stream(body, lambda s: emit({"type": "delta", "content": s}))
+            try:
+                m = chat_stream(body, lambda s: emit({"type": "delta", "content": s}), budget if think else None)
+            except ThinkBudget as tb:
+                # Budget spent: give the model its notes so far and make it act without further thinking.
+                emit({"type": "thinking", "content": tb.thinking + "\n[reasoning budget reached: acting]"})
+                cut = dict(body, think=False, messages=msgs + [{"role": "user", "content":
+                    "[system] Reasoning budget reached. Your notes so far:\n" + tb.thinking[-3000:] +
+                    "\n\nStop deliberating. Reply now with the tool call(s) for the next step, or the final report if the task is done."}])
+                m = chat_stream(cut, lambda s: emit({"type": "delta", "content": s}))
+                m.pop("thinking", None)
         except Exception as e:
             if "does not support tools" in str(e).lower() and not prompt_tools:
                 # Fall back to tools described in the prompt and calls written as JSON text.
