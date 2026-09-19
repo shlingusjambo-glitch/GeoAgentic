@@ -359,10 +359,16 @@ func pressRef(_ i: Int) -> String {
     if ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"].contains(role) {
         return AXUIElementSetAttributeValue(e, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success ? "ok" : "focus failed"
     }
-    var acts: CFArray?; AXUIElementCopyActionNames(e, &acts)
-    let names = acts as? [String] ?? []
-    for a in ["AXPress", "AXPick", "AXConfirm", "AXOpen"] where names.contains(a) {
-        if AXUIElementPerformAction(e, a as CFString) == .success { return "ok" }
+    // Text inside a tile/link/button is not itself pressable: walk up to the nearest ancestor that is.
+    var cur: AXUIElement? = e
+    for _ in 0..<6 {
+        guard let el = cur else { break }
+        var acts: CFArray?; AXUIElementCopyActionNames(el, &acts)
+        let names = acts as? [String] ?? []
+        for a in ["AXPress", "AXPick", "AXConfirm", "AXOpen"] where names.contains(a) {
+            if AXUIElementPerformAction(el, a as CFString) == .success { return "ok" }
+        }
+        cur = ax(el, kAXParentAttribute).map { $0 as! AXUIElement }
     }
     if role == "AXRow" || role == "AXCell" {  // select the row
         if AXUIElementSetAttributeValue(e, kAXSelectedAttribute as CFString, kCFBooleanTrue) == .success { return "ok" }

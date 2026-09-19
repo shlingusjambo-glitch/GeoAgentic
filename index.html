@@ -342,6 +342,14 @@
         </div>
 
         <div>
+          <label class="block text-xs font-semibold text-neutral-600 mb-1">Tool set</label>
+          <select id="setting-tools" class="w-full bg-neutral-100 border border-neutral-300 rounded-lg p-2 text-neutral-800 text-xs focus:outline-none">
+            <option value="compact">Compact — 9 simple tools, for small local models (default)</option>
+            <option value="full">Full — 30 tools (batch, form_input, menus, AppleScript, browser JS...), for 30B+ or cloud models</option>
+          </select>
+        </div>
+
+        <div>
           <label class="block text-xs font-semibold text-neutral-600 mb-1">Reasoning effort: <span id="setting-reasoning-label" class="font-mono text-neutral-800">none</span></label>
           <input type="range" id="setting-reasoning" min="0" max="6" step="1" value="0" class="w-full accent-blue-600">
           <div class="flex justify-between text-[10px] text-neutral-400 font-mono"><span>none</span><span>low</span><span>medium</span><span>high</span><span>extra</span><span>max</span><span>ultra</span></div>
@@ -739,7 +747,7 @@
       abortCtl = new AbortController();
       try {
         const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: abortCtl.signal,
-          body: JSON.stringify({ messages: history, cfg: { model: selectedModel, vision_model: profile.vision, reasoning: profile.reasoning || 'none' } }) });
+          body: JSON.stringify({ messages: history, cfg: { model: selectedModel, vision_model: profile.vision, reasoning: profile.reasoning || 'none', tools: profile.tools || 'compact' } }) });
         const reader = res.body.getReader();
         const dec = new TextDecoder();
         let buf = '';
@@ -1003,6 +1011,7 @@
     function openSettings() {
       document.getElementById('setting-name').value = profile.name;
       document.getElementById('setting-vision').value = profile.vision || 'moondream';
+      document.getElementById('setting-tools').value = profile.tools || 'compact';
       const RLEVELS = ['none','low','medium','high','extra','max','ultra'];
       const rs = document.getElementById('setting-reasoning');
       rs.value = Math.max(0, RLEVELS.indexOf(profile.reasoning || 'none'));
@@ -1021,6 +1030,7 @@
       profile.name = document.getElementById('setting-name').value.trim() || 'User';
       profile.vision = document.getElementById('setting-vision').value.trim() || 'moondream';
       profile.reasoning = ['none','low','medium','high','extra','max','ultra'][document.getElementById('setting-reasoning').value];
+      profile.tools = document.getElementById('setting-tools').value;
       localStorage.setItem('cg_profile', JSON.stringify(profile));
       updateProfileUI();
       closeSettings();
