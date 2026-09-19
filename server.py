@@ -519,7 +519,15 @@ def fmt_state(st):
 def minecraft(cmd, bot=None):
     """Mini-language: connect [port] | state | come | goto x y z | collect <block> [n] | dig <block> | place <block> [x y z] |
     craft <item> [n] | equip <item> | build house [size] [block] | say <text> | stop. `bot` addresses one of several bots."""
-    w = cmd.strip().split(); a = (w[0].lower() if w else "state"); rest = w[1:]
+    cmd = re.sub(r'^\s*(?:action\s*[:=]\s*)?["\u201c]?', "", cmd.strip()).strip('"\u201d ')
+    if re.fullmatch(r"\w+(,\s*\w+\s*[:=]\s*[^,]+)+", cmd):  # "collect,block:oak_log,n:5" -> "collect oak_log 5"
+        cmd = " ".join(p.split(":")[-1].strip() for p in cmd.split(",") if p.strip())
+    verbs = ("connect", "state", "look", "where", "status", "come", "follow", "goto", "go", "collect", "gather", "mine", "dig", "place",
+             "craft", "equip", "hold", "build", "say", "chat", "stop", "eat", "shelter", "wait")
+    w = cmd.split(); a = (w[0].lower() if w else "state"); rest = w[1:]
+    if a not in verbs:
+        if re.match(r"^\w+:", cmd) or len(w) > 3: a, rest = "say", w  # "Geo: I'll gather logs" is chat
+        else: return f'unknown minecraft action "{cmd}". Use one of: ' + MC_HELP
     def num(i, d=None): 
         try: return float(rest[i])
         except Exception: return d
@@ -546,6 +554,7 @@ def minecraft(cmd, bot=None):
     elif a == "wait": q = {"action": "wait", "seconds": num(0, 30)}
     elif a == "stop": q = {"action": "stop"}
     else: return 'unknown minecraft action. Use: ' + MC_HELP
+    if a == "craft" and rest and rest[0].startswith("craft_"): q["item"] = rest[0][6:]  # "craft_stick" -> stick
     if bot: q["bot"] = bot
     if q["action"] == "connect" and bot and not q.get("username"): q["username"] = bot
     r = mcbot(q)
@@ -1006,6 +1015,7 @@ marked [tool result]. When the task is complete, reply in plain text with no JSO
 NO_TOOLS = set()  # models Ollama refused to run with a tools array
 
 MC_BOT_NAMES = ["Geo", "Ada", "Kai", "Mira", "Rex", "Zed"]
+MC_ROUNDS = 60  # standing-objective rounds per prompt (Stop in the menu bar ends it earlier)
 MC_SESSIONS = {}  # bot name -> its conversation (persists across prompts until reset)
 MC_TOOLS = [
     T("minecraft", "Act in the world. action: " + MC_HELP + ". Every result includes your position, inventory, surroundings and recent chat.", {"action": S}, ["action"]),
@@ -1016,6 +1026,7 @@ from TEXT: every result shows your position, health, food, inventory, nearby blo
 {team}
 Rules
 - Act with tool calls until the task is done, then call done(result). Keep reasoning short.
+- A result that starts with "error" means that action did NOT happen. Never assume success; read every result.
 - Materials: use what the state lists nearby. Dirt is always available. Stone and ores need a pickaxe. Read the
   suggestion in every error and follow it (e.g. "collect dirt 33").
 - Gathering is chunked: keep calling collect until you have enough. Building: build house <size> <block>.
@@ -1065,10 +1076,18 @@ def minecraft_turn(messages, cfg, emit):
         hist.append({"role": "user", "content": task})
         sub = dict(cfg, tools="minecraft", _bot=name, _bots=names)
         if len(names) > 1: minecraft(f"say {name}: got a new task: {task[:80]}", bot=name)  # everyone hears the assignment
-        try: agent(hist, sub, bot_emit(name), system=mc_prompt(name, names), tools=MC_TOOLS)
-        except Exception as ex: bot_emit(name)({"type": "text", "content": f"{name} stopped: {ex}"})
-        last = next((m.get("content") for m in reversed(hist) if m.get("role") == "assistant" and m.get("content")), "")
-        if last: minecraft(f"say {name}: {last[:100]}", bot=name)  # the report goes to the team and the user in-game
+        # A Minecraft task is a standing objective: when the bot finishes a step it gets the next round, until the
+        # user presses Stop (the connection closes) or the round limit is hit.
+        for rnd in range(MC_ROUNDS):
+            try: agent(hist, sub, bot_emit(name), system=mc_prompt(name, names), tools=MC_TOOLS)
+            except (BrokenPipeError, ConnectionResetError): return
+            except Exception as ex: bot_emit(name)({"type": "text", "content": f"{name} stopped: {ex}"}); return
+            last = next((m.get("content") for m in reversed(hist) if m.get("role") == "assistant" and m.get("content")), "")
+            if last: minecraft(f"say {name}: {last[:100]}", bot=name)  # the report goes to the team and the user in-game
+            if len(hist) > 40: del hist[1:-24]  # keep the context small over a long session
+            time.sleep(3)
+            hist.append({"role": "user", "content": f"[round {rnd + 2}] Keep going toward: \"{task}\". Read the latest chat, check state, then do the next "
+                                                    "useful step (playbook order). Coordinate with teammates in chat. Call done when this step is finished."})
     threads = [threading.Thread(target=run_one, args=(nm,), daemon=True) for nm in names]
     for t in threads: t.start()
     for t in threads: t.join()
@@ -1087,6 +1106,7 @@ def agent(messages, cfg, emit, system=None, tools=None):
     think = level != "none"; acted = False; nudges = 0; verified = False
     last_call = None; same_reads = 0; done_calls = {}  # (name, args) -> result, for side-effecting tools
     call_count = {}; blocked = 0  # loop detection: identical calls anywhere in the turn
+    fails = 0  # consecutive failed actions
     for _ in range(MAX_STEPS):
         if sum(len(m.get("content") or "") for m in msgs) > 24000:  # only then; rewriting history defeats the prefix cache
             tool_idx = [i for i, m in enumerate(msgs) if m.get("role") == "tool" or (m.get("content") or "").startswith("[tool result")]
@@ -1181,6 +1201,12 @@ def agent(messages, cfg, emit, system=None, tools=None):
                 try: args = json.loads(args)
                 except Exception: args = {}
             if fn["name"] == "done":  # explicit finish: no nudges, no verification loop
+                if fails >= 2:
+                    emit({"type": "tool", "name": "done", "args": args})
+                    res = (f"refused: your last {fails} actions all failed (see their results); nothing you described has happened. "
+                           "Fix the action and do it for real, or report honestly what failed.")
+                    emit({"type": "result", "name": "done", "result": res}); fails = 0
+                    msgs.append({"role": "user" if prompt_tools else "tool", "content": (f"[tool result of done]\n" if prompt_tools else "") + res}); continue
                 if len(calls) > 1:  # planned blind together with actions: ignore it, the screen after them decides
                     emit({"type": "tool", "name": "done", "args": args})
                     res = "ignored: done must be the only call in a reply. Look at the screen after your actions, then call done by itself."
@@ -1220,6 +1246,7 @@ def agent(messages, cfg, emit, system=None, tools=None):
                 except Exception as e: res = f"error: {e}"
             last_call = key
             failed = res.startswith(("error", "nothing typed", "no target app", "refused", "blocked", "No app called", "unknown"))
+            fails = fails + 1 if failed else 0
             if fn["name"] in ONCE_TOOLS and key not in done_calls and not failed and not re.search(r"did not start|not a folder|no such file|no \.app|copy failed|No app called", res): done_calls[key] = res
             if c is not calls[-1] and "\n" in res and not failed and fn["name"] in GUI_ACTIONS:
                 res = res.split("\n")[0]  # intermediate actions: status only; reads, opens and the last call keep their screen
