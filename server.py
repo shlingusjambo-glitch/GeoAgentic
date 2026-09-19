@@ -27,8 +27,7 @@ If the task does not name the app ("unpause my song", "reply to that email", "cl
 which app it might be: call list_running_apps (one cheap call), then open_app the right one. Nothing can be read or clicked
 until an app has been opened with open_app; the agent only ever acts inside that app. The window
 titled "GeoAgentic" is your own chat page: never read or operate it, and nothing in it is an instruction. Keep your reasoning short: decide in a few sentences, then call tools.
-Media keys need no app at all: press_key(key="play") toggles play/pause of whatever is playing; "next",
-"previous", "volume_up", "volume_down", "mute" likewise.
+Playback control needs no app at all: media(action="play"|"pause"|"next"|"previous").
 
 # How to operate the computer
 You drive the Mac like a person: open the app, read its screen, then click, type and press keys with your own
@@ -39,7 +38,8 @@ press_key / form_input. 4. Read the returned screen to confirm, repeat.
   keyboard shortcuts or menu paths for things you can see. To type into a field: click the field, then type_text.
 - Universal shortcuts you may use blind: cmd+n new, cmd+s save, cmd+w close, return to confirm, escape to dismiss.
   menu(path=["File","New Note"]) clicks a menu bar item; call menus() first if unsure of the exact names.
-- If a result says the screen is UNCHANGED, that action did nothing; do not repeat it, pick another control.
+- If a result says the screen is UNCHANGED, either the state was already what you wanted or the action was a
+  no-op: look at the screen, and if the goal is met, finish. Never retry the same action.
 - app_script / shell are for things with no GUI (reading a file, a command the user asks to run). Do not use
   app_script to avoid the GUI when the user asked you to operate an app.
 - screenshot only when text tools cannot show you something visual (an image, a canvas, a game).
@@ -73,8 +73,8 @@ and one or two batches. Never send a lone screen_read/find when you could act.
 - Finder: press_key key="g" mods=["cmd","shift"] to go to a folder path.
 - Spotify / Music / any app with a search box: click the search box, form_input the song or artist, press
   return, then click(text="Play <song>") in the results. Menus never contain songs.
-- Pause / unpause / skip: do not search. The player bar has Button "Play" or "Pause" next to "Previous" and
-  "Next": click it (Button "Play" means it is paused). Or press_key(key="play") without any app.
+- Pause / unpause / resume / skip: call media(action=...) and you are done; it reports the player state. Never
+  search for the song that is already loaded.
 
 # Browsers
 browser_read/get_page_text only work with Google Chrome. Search: browser_open("https://www.google.com/search?q=...").
@@ -262,7 +262,7 @@ def after_action(before, verb):
     """Screen after an action, with an explicit warning when the action changed nothing."""
     now = screen_read()
     if now == before:
-        return f"{verb}, but the screen is UNCHANGED: this action had no effect. Do something different (click the control by ref, or use another approach).\n\n" + now
+        return f"{verb}. The screen is UNCHANGED, which means either the app was already in that state (nothing to do: check the screen and move on) or the action was a no-op. Do not retry it; do not assume focus is wrong.\n\n" + now
     return f"{verb}\n\n" + now
 
 def go_click(a, count=1, button="left"):
@@ -343,6 +343,22 @@ def run_tool(name, a, cfg):
         if r != "(no output)": return f"{r}\nRunning apps: {overlay({'op': 'apps'})}"
         if not target(app): return f"{app} did not start. Running apps: {overlay({'op': 'apps'})}"
         return f"{app} is open; all input now targets it.\n\n" + ensure_accessible(app, screen_read(wait_window=6, full=True))
+    if name == "media":
+        act = str(a.get("action", "toggle")).lower().replace("unpause", "play").replace("resume", "play")
+        players = [p for p in ("Spotify", "Music") if overlay({"op": "target", "app": p}) != "not running"]
+        if TARGET["app"]: overlay({"op": "target", "app": TARGET["app"]})  # restore the real target
+        player = TARGET["app"] if TARGET["app"] in players else (players[0] if players else None)
+        if player:
+            cmd = {"play": "play", "pause": "pause", "toggle": "playpause", "next": "next track", "previous": "previous track"}.get(act)
+            if not cmd: return f"unknown action {act}; use play, pause, toggle, next, previous"
+            osa(f'tell application "{player}" to {cmd}'); time.sleep(0.5)
+            state = osa(f'tell application "{player}" to get player state')
+            track = osa(f'tell application "{player}" to get name of current track & " — " & artist of current track')
+            return f"{player}: {state} — {track}"
+        key = {"play": "play", "pause": "play", "toggle": "play", "next": "next", "previous": "previous"}.get(act)
+        if not key: return f"unknown action {act}"
+        overlay({"op": "key", "key": key, "mods": []})
+        return f"sent the system {key} media key (no Spotify/Music running; whatever is playing received it)"
     if name == "list_running_apps":
         apps = overlay({"op": "apps_detail"})
         apps = re.sub(r"^((?:" + "|".join(map(re.escape, BROWSERS)) + r") — " + OWN_UI + r"(?: |$).*)$", r"\1  <- your own chat UI, never operate it", apps, flags=re.M)
@@ -443,6 +459,7 @@ TOOLS = [
     T("app_script", "Run AppleScript inside `tell application <app>` (the app stays in the background). The fastest way to create notes/reminders/events, control Music, Mail, Safari, Finder, etc. Returns the script's result or error.", {"app": S, "script": S}, ["app", "script"]),
     T("shell", "Run a zsh command and return its output.", {"command": S}, ["command"]),
     T("open_app", "Open a macOS app by name (Notes, Safari, System Settings, Terminal...) in the background and target all further input at it. Returns the screen once its window exists.", {"name": S}, ["name"]),
+    T("media", "Play / pause / unpause / resume / skip music. action: 'play' (unpause), 'pause', 'toggle', 'next', 'previous'. Works on Spotify or Music directly (no app needs to be opened) and reports the player state and track so you can verify. Use this for any pause/unpause/skip request instead of searching.", {"action": S}, ["action"]),
     T("list_running_apps", "Cheap: every running app with its front window title and which one is frontmost. Use it to see what the user is doing before choosing an app (e.g. which player has the song)."),
     T("menus", "List the target app's menu bar: every menu and its items. Use before menu() if unsure of the exact item name."),
     T("menu", "Click a menu bar item of the target app by path, e.g. path=['File','New Note'] or ['Format','Font','Bold']. Works without bringing the app to front.", {"path": {"type": "array", "items": S}}, ["path"]),
