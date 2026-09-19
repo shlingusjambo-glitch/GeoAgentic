@@ -401,6 +401,15 @@ func handle(_ c: [String: Any]) -> String {
         out += "\nchildren: \(kids.count) " + kids.prefix(6).map { (ax($0, kAXRoleAttribute) as? String ?? "?") + ":" + (ax($0, kAXTitleAttribute) as? String ?? "") }.joined(separator: ", ")
         if let par = ax(e, kAXParentAttribute) { let pe = par as! AXUIElement; out += "\nparent: \(ax(pe, kAXRoleAttribute) ?? "")/\(ax(pe, kAXSubroleAttribute) ?? "") value=\(ax(pe, kAXValueAttribute) ?? "")" }
         return out.replacingOccurrences(of: "\n", with: "\u{1}")
+    case "wins":  // debug: on-screen windows under a point, front to back
+        let p = CGPoint(x: c["x"] as? Double ?? pos.x, y: c["y"] as? Double ?? pos.y)
+        var out: [String] = []
+        for w in (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? [] {
+            guard let b = w[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
+            let r = CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0, width: b["Width"] ?? 0, height: b["Height"] ?? 0)
+            if r.contains(p) { out.append("pid=\(w[kCGWindowOwnerPID as String] ?? 0) \(w[kCGWindowOwnerName as String] ?? "?") layer=\(w[kCGWindowLayer as String] ?? 0) alpha=\(w[kCGWindowAlpha as String] ?? 1) \(Int(r.width))x\(Int(r.height))") }
+        }
+        return out.joined(separator: "\u{1}")
     case "state":
         return "pos=\(Int(pos.x)),\(Int(pos.y)) showing=\(showing) overTarget=\(overTarget()) alpha=\(win.alphaValue)"
     case "activate":  // last resort for apps that ignore background input: bring the target to front
@@ -460,6 +469,9 @@ func handle(_ c: [String: Any]) -> String {
     }
     return "ok"
 }
+
+// Window stacking changes while the cursor sits still (the user raises another app): keep visibility current.
+Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in if showing { win.alphaValue = overTarget() ? 1 : 0 } }
 
 DispatchQueue.global().async {
     while let line = readLine() {

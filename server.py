@@ -38,17 +38,23 @@ press_key / form_input. 4. Read the returned screen to confirm, repeat.
 
 # Reading the screen
 - screen_read returns the target app's visible elements as `[ref_N] Role "name" = "value"`: interactive
-  elements first, then text. Sheets/dialogs are listed first when present. Use find(query) to locate one
-  element by text instead of re-reading. Refs change every read; only use refs from the latest read.
+  elements first, then text. Refs are STABLE: the same control keeps its ref until it disappears. After an
+  action you get only what changed ("new", "changed", "gone"); everything else is still there with the same refs.
+  Use find(query) to locate a control by text instead of re-reading.
 - browser_read (Chrome) returns the page text and its clickable elements in the same ref format.
 - Do NOT read the same screen twice in a row. If a read shows the app is ready, ACT.
 - Onboarding / welcome sheets block an app: click their "Continue"/"OK"/"Get Started" button first.
 - Sidebar banners like "Do you want to be notified..." are not blockers; ignore them.
 
-# Working in batches
-Send several steps in one batch call, like a human doing a sequence without stopping after every keystroke:
-batch([press_key n+cmd, type_text "Title", press_key return, type_text "body"]). Only the last step returns the
-screen. Then read it and decide the next batch.
+# Work in whole sequences, not one step at a time
+Reading the screen after every single click is slow. After ONE read, plan the entire sequence and send it as
+ONE batch (or several tool calls in one reply). Target controls you have not seen yet by text: click(text=...)
+looks the label up when it runs and waits for it to appear. Example, "play MEGALOVANIA on Spotify":
+  open_app("Spotify")  -> read the screen once, then a single batch:
+  batch([click text="What do you want to play?", form_input value="MEGALOVANIA", press_key key="return",
+         click text="Play MEGALOVANIA"])
+Only the last step returns the screen: check it, and finish or send the next batch. Most tasks are one read
+and one or two batches. Never send a lone screen_read/find when you could act.
 
 # App specifics
 - Notes: press_key n+cmd for a new note. The first line typed becomes the title; press return and keep typing for
@@ -57,9 +63,8 @@ screen. Then read it and decide the next batch.
   at the top of the sidebar, type what you need (e.g. "Night Shift", "Dark"), press return, then screen_read and
   click the result. Night Shift and True Tone are in Displays; Dark Mode is Appearance; volume is Sound.
 - Finder: press_key key="g" mods=["cmd","shift"] to go to a folder path.
-- Spotify / Music / any app with a search box: click the search box (ComboBox "What do you want to play?" /
-  TextField "Search"), type_text the song or artist, press return, then click the "Play <song>" button in the
-  results. Menus never contain songs.
+- Spotify / Music / any app with a search box: click the search box, form_input the song or artist, press
+  return, then click(text="Play <song>") in the results. Menus never contain songs.
 
 # Browsers
 browser_read/get_page_text only work with Google Chrome. Search: browser_open("https://www.google.com/search?q=...").
@@ -121,39 +126,94 @@ def screenshot(vision_model):
         "prompt": "Describe this screenshot precisely: which app, all visible text, buttons, fields, dialogs, and where they are."})
     return r.get("response") or r.get("error", "vision model failed")
 
-# ---------- refs: every read numbers its elements so the model acts on `ref_N`, not raw coordinates ----------
-REFS = {}  # "ref_N" -> (x, y, line)
-REFS_FROM_TREE = True  # False when REFS came from browser_read (no AX elements behind them)
+# ---------- refs: stable element ids across reads, so a read after an action only sends what changed ----------
+# key (role + name, de-duplicated by occurrence) -> ref number, per target app. The model sees `[ref_N] Role "name"`;
+# the coordinates and the element index live here and never reach the model.
+REFS = {}          # "ref_N" -> {"x","y","line","idx","key"} for elements on the CURRENT screen
+_refnum = {}       # key -> N (stable for the life of the app/page)
+_prev_lines = {}   # "ref_N" -> model-facing line as of the previous read
+_scope = [""]      # what the ref table belongs to (app name or page url); a change resets it
+REFS_FROM_TREE = True
 _coord = re.compile(r"@(-?\d+),(-?\d+)\s*$")
-MAX_INTERACTIVE, MAX_TEXT = 70, 20
-def annotate(text, from_tree=True):
-    """Number the elements (refs keep their coordinates; the model only sees `[ref_N] Role "name"`, since numbers
-    cost tokens and it acts by ref anyway) and cap each section so a busy web app stays a few hundred tokens."""
+_state = re.compile(r'( = "[^"]*")|( \((?:selected|focused|disabled|on|off)\))')
+MAX_INTERACTIVE, MAX_TEXT = 70, 12
+
+def reset_refs(scope):
+    if scope != _scope[0]:
+        _scope[0] = scope; _refnum.clear(); _prev_lines.clear()
+
+def annotate(text, from_tree=True, full=False):
+    """Number the elements with stable refs and return either the full screen or a diff against the last read."""
     global REFS_FROM_TREE
     REFS_FROM_TREE = from_tree
-    REFS.clear(); out = []; section = None; n = 0; dropped = 0
+    REFS.clear()
+    head, act, txt = [], [], []
+    seen_keys = {}; idx = 0; section = None; act_names = set()
     for line in text.split("\n"):
         m = _coord.search(line)
-        if line.startswith("-- "):
-            if dropped: out.append(f"   … {dropped} more (use find to search them)"); dropped = 0
-            section = line; n = 0
-        if m:
-            k = f"ref_{len(REFS) + 1}"; REFS[k] = (int(m.group(1)), int(m.group(2)), line[:m.start()].rstrip())
-            n += 1
-            limit = MAX_TEXT if section and section.startswith("-- text") else MAX_INTERACTIVE
-            if n > limit: dropped += 1; continue
-            line = f"[{k}] {line[:m.start()].rstrip()}"
-        out.append(line)
-    if dropped: out.append(f"   … {dropped} more (use find to search them)")
+        if line.startswith("-- "): section = line; continue
+        if not m: head.append(line); continue
+        idx += 1
+        body = line[:m.start()].rstrip()
+        key = _state.sub("", body); seen_keys[key] = seen_keys.get(key, 0) + 1
+        key = f"{key}#{seen_keys[key]}"
+        n = _refnum.setdefault(key, len(_refnum) + 1)
+        k = f"ref_{n}"
+        REFS[k] = {"x": int(m.group(1)), "y": int(m.group(2)), "line": body, "idx": idx, "key": key}
+        if section and section.startswith("-- text"):
+            q = body.split('"')[1] if '"' in body else ""
+            if q and q in act_names: continue  # label of a control already listed
+            txt.append((k, body))
+        else:
+            act.append((k, body))
+            if '"' in body: act_names.add(body.split('"')[1])
+    cur = {k: b for k, b in act + txt}
+    out = [l for l in head if l.strip()]
+    if full or not _prev_lines:
+        def sect(title, items, cap):
+            out.append(f"-- {title} ({len(items)}) --"); out.extend(f"[{k}] {b}" for k, b in items[:cap])
+            if len(items) > cap: out.append(f"   … {len(items) - cap} more (use find to search them)")
+        sect("interactive", act, MAX_INTERACTIVE); sect("text", txt, MAX_TEXT)
+    else:
+        added = [(k, b) for k, b in act + txt if k not in _prev_lines]
+        changed = [(k, b) for k, b in act + txt if k in _prev_lines and _prev_lines[k] != b]
+        gone = [k for k in _prev_lines if k not in cur]
+        same = len(cur) - len(added) - len(changed)
+        if len(added) + len(changed) > 0.6 * max(len(cur), 1):  # mostly new screen: show it whole
+            _prev_lines.clear(); return annotate(text, from_tree, full=True)
+        if added: out.append(f"-- new ({len(added)}) --"); out += [f"[{k}] {b}" for k, b in added[:MAX_INTERACTIVE]]
+        if changed: out.append(f"-- changed ({len(changed)}) --"); out += [f"[{k}] {b}" for k, b in changed[:30]]
+        if gone: out.append(f"-- gone: {', '.join(gone[:25])}" + (" …" if len(gone) > 25 else ""))
+        out.append(f"-- unchanged: {same} elements, their refs are still valid (find(query) lists them) --")
+    _prev_lines.clear(); _prev_lines.update(cur)
     return "\n".join(out)
 
+ROLE_RANK = ["Button", "Link", "MenuItem", "Row", "CheckBox", "TextField", "ComboBox", "TextArea", "PopUpButton", "RadioButton", "Tab"]
+def resolve_text(text, wait=4.0):
+    """Find an element by (case-insensitive) label on the CURRENT screen, re-reading until it shows up.
+    Lets a batch target controls that did not exist when the batch was planned (search results, dialogs)."""
+    q = str(text).lower().strip(); deadline = time.time() + wait
+    while True:
+        annotate(overlay({"op": "tree"}))  # refresh REFS (same stable numbering)
+        hits = [(k, v) for k, v in REFS.items() if q in v["line"].lower()]
+        if hits:
+            def rank(h):
+                role = h[1]["line"].split(" ")[0]
+                exact = f'"{q}"' in h[1]["line"].lower()
+                return (0 if exact else 1, ROLE_RANK.index(role) if role in ROLE_RANK else 50, h[1]["idx"])
+            return sorted(hits, key=rank)[0][0]
+        if time.time() > deadline:
+            raise ValueError(f'no element containing "{text}" on the screen (waited {wait:.0f}s). Read the screen and use what is there.')
+        time.sleep(0.5)
+
 def point(a):
-    """Resolve x,y from a ref or explicit coordinates."""
+    """Resolve x,y from a ref, a text label, or explicit coordinates."""
+    if a.get("text") and not a.get("ref"): a["ref"] = resolve_text(a["text"])
     r = a.get("ref")
     if r:
         r = str(r).strip(); r = r if r.startswith("ref_") else "ref_" + r
         if r not in REFS: raise ValueError(f"{r} is not on the current screen; use a ref from the latest screen_read/browser_read/find")
-        return REFS[r][0], REFS[r][1]
+        return REFS[r]["x"], REFS[r]["y"]
     if "x" in a and "y" in a: return float(a["x"]), float(a["y"])
     raise ValueError("need ref or x,y")
 
@@ -161,17 +221,18 @@ def clip(text, limit=6000):
     if len(text) <= limit: return text
     return text[:limit] + f"\n… ({len(text) - limit} more chars; use find(query) to search everything on this screen)"
 
-def screen_read(wait_window=0):
-    """Visible AX tree of the target app; optionally wait until it actually has a window."""
+def screen_read(wait_window=0, full=False):
+    """Visible AX tree of the target app (full on explicit reads, a diff after actions)."""
     t = overlay({"op": "tree"})
     deadline = time.time() + wait_window
     while "window:" not in t and time.time() < deadline:
         time.sleep(0.4); t = overlay({"op": "tree"})
-    return clip(annotate(t))
+    reset_refs("app:" + TARGET["app"])
+    return clip(annotate(t, full=full))
 
 def find(query):
     q = str(query).lower().strip()
-    hits = [f"[{k}] {v[2]}" for k, v in REFS.items() if q in v[2].lower()]
+    hits = [f"[{k}] {v['line']}" for k, v in REFS.items() if q in v["line"].lower()]
     return "\n".join(hits[:25]) or f"no element containing {query!r} on the current screen (scroll, or read the screen again if it changed)"
 
 def after_action(before, verb):
@@ -187,11 +248,12 @@ def go_click(a, count=1, button="left"):
     x, y = point(a)
     before = overlay({"op": "tree"})
     overlay({"op": "shape", "shape": "hand"}); overlay({"op": "move", "x": x, "y": y})
-    ref = str(a.get("ref") or "").strip().replace("ref_", "")
-    if ref.isdigit() and count == 1 and button == "left" and REFS_FROM_TREE:
+    ref = str(a.get("ref") or "").strip()
+    ref = ref if ref.startswith("ref_") else "ref_" + ref
+    if ref in REFS and count == 1 and button == "left" and REFS_FROM_TREE:
         # press the element itself (exact, works in the background); fall through to mouse events if nothing changed
         overlay({"op": "click", "count": 0, "button": "left"})  # ripple/animation only
-        overlay({"op": "press", "index": int(ref)}); time.sleep(0.6)
+        overlay({"op": "press", "index": REFS[ref]["idx"]}); time.sleep(0.6)
     else:
         overlay({"op": "click", "count": count, "button": button}); time.sleep(0.6)
     if count == 1 and button == "left":
@@ -240,7 +302,7 @@ def ensure_accessible(app, t):
     osa(f'tell application {json.dumps(app)} to quit'); time.sleep(2)
     sh(f'open -g -a {json.dumps(app)} --args --force-renderer-accessibility'); time.sleep(4)
     target(app)
-    return f"({app} was relaunched with accessibility enabled)\n" + screen_read(wait_window=10)
+    return f"({app} was relaunched with accessibility enabled)\n" + screen_read(wait_window=10, full=True)
 
 def run_tool(name, a, cfg):
     if name == "shell": return sh(a["command"])
@@ -250,7 +312,7 @@ def run_tool(name, a, cfg):
         r = sh(f'open -g -a {json.dumps(app)}')  # -g: open without stealing the user's focus
         if r != "(no output)": return f"{r}\nRunning apps: {overlay({'op': 'apps'})}"
         if not target(app): return f"{app} did not start. Running apps: {overlay({'op': 'apps'})}"
-        return f"{app} is open; all input now targets it.\n\n" + ensure_accessible(app, screen_read(wait_window=6))
+        return f"{app} is open; all input now targets it.\n\n" + ensure_accessible(app, screen_read(wait_window=6, full=True))
     if name == "menus": return overlay({"op": "menus"})
     if name == "menu":
         p = a.get("path") or []
@@ -275,7 +337,7 @@ def run_tool(name, a, cfg):
         p = os.path.expanduser(a["path"]); os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
         open(p, "w").write(a["content"]); return f"wrote {p}"
     if name == "screen_read":
-        t = screen_read()
+        t = screen_read(full=True)
         if empty_tree(t):
             t = ensure_accessible(TARGET["app"], t) if TARGET["app"] else t
             if empty_tree(t): t += "\n(this app exposes no accessible elements: use keyboard shortcuts, or screenshot to see it)"
@@ -285,7 +347,9 @@ def run_tool(name, a, cfg):
         b = a.get("browser") or "Google Chrome"
         sh(f'open -g -a {json.dumps(b)} {json.dumps(a["url"])}'); time.sleep(2.5); target(b)
         return run_tool("browser_read" if "Chrome" in b else "screen_read", {}, cfg)
-    if name == "browser_read": return clip(annotate(browser_js(BROWSER_JS), from_tree=False), 8000)
+    if name == "browser_read":
+        t = browser_js(BROWSER_JS); reset_refs("page:" + t.split("\n")[0])
+        return clip(annotate(t, from_tree=False, full=True), 8000)
     if name == "get_page_text": return browser_js("document.body.innerText")[:int(a.get("max_chars", 20000))]
     if name == "browser_js": return browser_js(a["js"])[:6000]
     if name == "browser_back": browser_js("history.back()"); time.sleep(1.5); return run_tool("browser_read", {}, cfg)
@@ -304,7 +368,7 @@ def run_tool(name, a, cfg):
         overlay({"op": "drag", "x": x2, "y": y2}); time.sleep(0.6)
         return "dragged\n\n" + screen_read()
     if name == "form_input":
-        if a.get("ref") or "x" in a: go_click(a)  # focus the field
+        if a.get("ref") or a.get("text") or "x" in a: go_click(a)  # focus the field
         v = str(a.get("value", ""))
         if overlay({"op": "setvalue", "value": v}) != "ok":  # element refused AXValue: select all and retype
             overlay({"op": "key", "key": "a", "mods": ["cmd"]}); overlay({"op": "type", "text": v})
@@ -313,7 +377,7 @@ def run_tool(name, a, cfg):
         before = overlay({"op": "tree"})
         foc = next((l for l in before.split("\n") if l.startswith("focused:")), "focused: nothing")
         if not re.search(r"focused: (TextField|TextArea|ComboBox|SearchField|SecureTextField|WebArea)", foc):
-            fields = [f"[{k}] {v[2]}" for k, v in REFS.items() if re.search(r"^(TextField|TextArea|ComboBox|SearchField|search|text|textarea|email|url|password)\b", v[2])]
+            fields = [f"[{k}] {v['line']}" for k, v in REFS.items() if re.search(r"^(TextField|TextArea|ComboBox|SearchField|search|text|textarea|email|url|password)\b", v["line"])]
             return (f"nothing typed: no text field has focus ({foc}). Click a text field first, then type_text."
                     + ("\nText fields on this screen:\n" + "\n".join(fields[:8]) if fields else ""))
         overlay({"op": "show"}); overlay({"op": "type", "text": a["text"]})
@@ -338,7 +402,7 @@ def T(name, desc, props=None, req=None):
     return {"type": "function", "function": {"name": name, "description": desc,
             "parameters": {"type": "object", "properties": props or {}, "required": req or []}}}
 S = {"type": "string"}; N = {"type": "number"}; B = {"type": "boolean"}
-REF = {"ref": S, "x": N, "y": N}
+REF = {"ref": S, "text": S, "x": N, "y": N}
 TOOLS = [
     T("app_script", "Run AppleScript inside `tell application <app>` (the app stays in the background). The fastest way to create notes/reminders/events, control Music, Mail, Safari, Finder, etc. Returns the script's result or error.", {"app": S, "script": S}, ["app", "script"]),
     T("shell", "Run a zsh command and return its output.", {"command": S}, ["command"]),
@@ -347,11 +411,11 @@ TOOLS = [
     T("menu", "Click a menu bar item of the target app by path, e.g. path=['File','New Note'] or ['Format','Font','Bold']. Works without bringing the app to front.", {"path": {"type": "array", "items": S}}, ["path"]),
     T("screen_read", "Visible elements of the target app's window as `[ref_N] Role \"name\" = \"value\"`, interactive first, dialogs first. Act on them by ref: click(ref='ref_N'), form_input(ref=..., value=...)."),
     T("find", "Search the latest screen/page dump for elements whose role, name or value contains the query (case-insensitive). Returns matching refs.", {"query": S}, ["query"]),
-    T("click", "Click an element by ref (from screen_read/browser_read/find) or by screen x,y. count=2 for double click, button='right' for a context menu.", {**REF, "count": N, "button": S}),
-    T("form_input", "Set the entire value of a text field / text area / search box (ref or x,y), replacing existing content.", {**REF, "value": S}, ["value"]),
+    T("click", "Click an element: by ref (from a screen dump), or by text=\"label\" which is looked up on the screen at the moment the click runs (waits up to 4s for it to appear, so it works for search results and dialogs you have not seen yet). count=2 for double click, button='right' for a context menu.", {**REF, "count": N, "button": S}),
+    T("form_input", "Set the entire value of a text field / search box (by ref, text label, or x,y), replacing existing content. Omit the target to use the focused field.", {**REF, "value": S}, ["value"]),
     T("type_text", "Type text at the current focus (appends at the caret). press_enter=true to hit return afterwards.", {"text": S, "press_enter": B}, ["text"]),
     T("press_key", "Press a key with optional modifiers, e.g. key='return', or key='n' mods=['cmd']. repeat=N to press it N times.", {"key": S, "mods": {"type": "array", "items": S}, "repeat": N}, ["key"]),
-    T("batch", "Run several actions in one call, in order, e.g. [{name:'press_key',args:{key:'n',mods:['cmd']}},{name:'type_text',args:{text:'Groceries'}},{name:'press_key',args:{key:'return'}},{name:'type_text',args:{text:'milk'}}]. Only the last action returns its full screen. Use for any multi-step GUI sequence.",
+    T("batch", "Run a whole sequence in one call, in order, e.g. [{name:'click',args:{text:'What do you want to play?'}},{name:'form_input',args:{value:'MEGALOVANIA'}},{name:'press_key',args:{key:'return'}},{name:'click',args:{text:'Play MEGALOVANIA'}}]. Steps may target elements by text that only appear after earlier steps. Only the last action returns the screen; a failing step stops the batch.",
       {"actions": {"type": "array", "items": {"type": "object", "properties": {"name": S, "args": {"type": "object"}}, "required": ["name"]}}}, ["actions"]),
     T("browser_open", "Open a URL. browser defaults to 'Google Chrome' (which supports browser_read); pass 'Safari' or 'Firefox' if the user asks, then use screen_read.", {"url": S, "browser": S}, ["url"]),
     T("browser_read", "Active Chrome tab: url, title, interactive elements as `[ref_N] tag \"label\" @x,y`, then page text."),
@@ -402,36 +466,72 @@ def chat_stream(body, on_text):
     return msg
 
 def fake_calls(text):
-    """Small models sometimes print a tool call as JSON text instead of using native tool calling."""
-    out = []
-    for mt in re.finditer(r'\{[^{}]*"name"\s*:\s*"(\w+)"[^{}]*?"(?:arguments|parameters|args)"\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*\})[^{}]*\}', text):
-        try: out.append({"function": {"name": mt.group(1), "arguments": json.loads(mt.group(2))}})
+    """Tool calls written as JSON text: {"name": "click", "args": {"ref": "ref_5"}}, one or more, anywhere in the reply.
+    Used for models with no native tool calling (and for small ones that forget to use it)."""
+    found = []; spans = []
+    for mt in re.finditer(r'\{[^{}]*"name"\s*:\s*"(\w+)"[^{}]*?"(?:arguments|parameters|args)"\s*:\s*(\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\})[^{}]*\}', text):
+        try: found.append((mt.start(), mt.group(1), json.loads(mt.group(2)))); spans.append(mt.span())
         except Exception: pass
-    return out
+    for mt in re.finditer(r'\{\s*"name"\s*:\s*"(\w+)"\s*\}', text):  # bare call with no args
+        if not any(a <= mt.start() < b for a, b in spans): found.append((mt.start(), mt.group(1), {}))
+    return [{"function": {"name": n, "arguments": a}} for _, n, a in sorted(found)]
+
+def tools_as_text():
+    """Compact tool list for models without native tool calling (deepseek-coder, codellama, ...)."""
+    lines = []
+    for t in TOOLS:
+        f = t["function"]; props = f["parameters"]["properties"]; req = set(f["parameters"].get("required", []))
+        args = ", ".join(k + ("" if k in req else "?") for k in props)
+        lines.append(f"- {f['name']}({args}): {f['description']}")
+    return "\n".join(lines)
+
+PROMPT_TOOLS = """
+
+# Tool calling (this model has no native tool API)
+Available tools:
+%s
+
+To use a tool, reply with ONLY a JSON object on its own line, nothing else:
+{"name": "click", "args": {"ref": "ref_5"}}
+You may put several such lines in one reply; they run in order. Tool results come back in the next message,
+marked [tool result]. When the task is complete, reply in plain text with no JSON.""" % tools_as_text()
+
+NO_TOOLS = set()  # models Ollama refused to run with a tools array
 
 def agent(messages, cfg, emit):
-    msgs = [{"role": "system", "content": SYSTEM}] + messages
+    prompt_tools = cfg["model"] in NO_TOOLS
+    msgs = [{"role": "system", "content": SYSTEM + (PROMPT_TOOLS if prompt_tools else "")}] + messages
     task = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-    think = True; acted = False; nudges = 0; verified = False
+    think = bool(cfg.get("think", False)); acted = False; nudges = 0; verified = False
     last_call = None; same_reads = 0; done_calls = {}  # (name, args) -> result, for side-effecting tools
     for _ in range(MAX_STEPS):
-        # Older screen dumps are stale and huge; keep only the most recent one in full so the context (and the
-        # per-call prompt time) stays flat over a long task.
-        tool_idx = [i for i, m in enumerate(msgs) if m.get("role") == "tool"]
-        for i in tool_idx[:-1]:
-            c = msgs[i]["content"]
-            if "\n" in c and len(c) > 300:
-                msgs[i]["content"] = c.split("\n")[0][:200] + "\n(older screen omitted)"
-        body = {"model": cfg["model"], "messages": msgs, "tools": TOOLS, "keep_alive": "30m",
+        if sum(len(m.get("content") or "") for m in msgs) > 24000:  # only then; rewriting history defeats the prefix cache
+            tool_idx = [i for i, m in enumerate(msgs) if m.get("role") == "tool" or (m.get("content") or "").startswith("[tool result")]
+            for i in tool_idx[:-1]:
+                c = msgs[i]["content"]
+                if "\n" in c and len(c) > 300:
+                    msgs[i]["content"] = c.split("\n")[0][:200] + "\n(older screen omitted)"
+        body = {"model": cfg["model"], "messages": msgs, "keep_alive": "30m",
                 # num_predict caps runaway generation: a stuck small model otherwise burns the GPU for minutes
                 "options": {"temperature": 0.1, "num_ctx": int(cfg.get("num_ctx") or NUM_CTX), "num_predict": 1024}}
-        if think: body["think"] = True
+        if think is not None: body["think"] = think
+        if not prompt_tools: body["tools"] = TOOLS
         t0 = time.time()
         try:
             m = chat_stream(body, lambda s: emit({"type": "delta", "content": s}))
         except Exception as e:
-            if think and "think" in str(e).lower():  # model has no thinking mode
-                think = False; continue
+            if "does not support tools" in str(e).lower() and not prompt_tools:
+                # Fall back to tools described in the prompt and calls written as JSON text.
+                NO_TOOLS.add(cfg["model"]); prompt_tools = True
+                msgs[0] = {"role": "system", "content": SYSTEM + PROMPT_TOOLS}
+                emit({"type": "thinking", "content": f"{cfg['model']} has no native tool calling; using prompted tools."})
+                continue
+            if "think" in str(e).lower():  # model has no thinking switch at all
+                body.pop("think", None); think = None
+                try: m = chat_stream(body, lambda s: emit({"type": "delta", "content": s}))
+                except Exception as e2: emit({"type": "text", "content": f"Ollama error: {e2}"}); return
+            else:
+                emit({"type": "text", "content": f"Ollama error: {e}"}); return
             emit({"type": "text", "content": f"Ollama error: {e}"}); return
         print(f"  model {time.time() - t0:.1f}s calls={len(m.get('tool_calls') or [])} text={len(m.get('content') or '')} {m.get('done_reason', '')}", file=sys.stderr)
         m.pop("done_reason", None)
@@ -458,6 +558,8 @@ def agent(messages, cfg, emit):
             if text: emit({"type": "text", "content": text})
             return
         acted = True
+        if prompt_tools:  # keep the JSON out of the chat, and feed results back as a user turn
+            m["content"] = re.sub(r"\{[^\n]*\}", "", m.get("content") or "").strip()
         for c in calls:
             fn = c["function"]; args = fn.get("arguments") or {}
             if isinstance(args, str):
@@ -478,8 +580,12 @@ def agent(messages, cfg, emit):
                 except Exception as e: res = f"error: {e}"
             last_call = key
             if fn["name"] in ONCE_TOOLS and key not in done_calls and not res.startswith("error") and "did not start" not in res: done_calls[key] = res
+            if c is not calls[-1] and "\n" in res and not res.startswith(("error", "nothing typed")):
+                res = res.split("\n")[0]  # intermediate steps: status only, the last call carries the screen
             emit({"type": "result", "name": fn["name"], "result": res})
-            msgs.append({"role": "tool", "content": str(res)})
+            if res.startswith(("error", "nothing typed")) and c is not calls[-1]:
+                msgs.append({"role": "user" if prompt_tools else "tool", "content": (f"[tool result of {fn['name']}]\n" if prompt_tools else "") + res + "\n(remaining calls in this reply were skipped)"}); break
+            msgs.append({"role": "user" if prompt_tools else "tool", "content": (f"[tool result of {fn['name']}]\n" if prompt_tools else "") + str(res)})
     emit({"type": "text", "content": "(stopped: step limit reached)"})
 
 def agent_turn(messages, cfg, emit):
