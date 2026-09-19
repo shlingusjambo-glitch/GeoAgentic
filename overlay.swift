@@ -42,6 +42,7 @@ func frame(_ secs: Double) { RunLoop.main.run(until: Date(timeIntervalSinceNow: 
 func overTarget() -> Bool {
     guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return true }
     let me = getpid(), t = pid()
+    if t == 0 { return false }
     for w in list {  // front-to-back
         guard let owner = w[kCGWindowOwnerPID as String] as? pid_t, owner != me,
               (w[kCGWindowLayer as String] as? Int ?? 0) == 0,
@@ -116,13 +117,15 @@ func mediaKey(_ name: String) -> Bool {
     }
     return true
 }
+// The agent only ever acts on the app it opened. No target -> no reads, no input, no cursor.
 func pid() -> pid_t {
     if targetPid != 0, NSRunningApplication(processIdentifier: targetPid) != nil { return targetPid }
-    return NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+    return 0
 }
-func send(_ e: CGEvent?) { e?.postToPid(pid()) }
+func send(_ e: CGEvent?) { let p = pid(); if p != 0 { e?.postToPid(p) } }
 func appEl() -> AXUIElement { AXUIElementCreateApplication(pid()) }
 func focusedEl() -> AXUIElement? {
+    if pid() == 0 { return nil }
     var v: AnyObject?
     return AXUIElementCopyAttributeValue(appEl(), kAXFocusedUIElementAttribute as CFString, &v) == .success ? (v as! AXUIElement) : nil
 }
@@ -310,7 +313,7 @@ func walk(_ e: AXUIElement, _ depth: Int, _ inRow: Bool, _ act: inout [String], 
 }
 func tree() -> String {
     let p = pid()
-    guard let app = NSRunningApplication(processIdentifier: p) else { return "no target app" }
+    guard p != 0, let app = NSRunningApplication(processIdentifier: p) else { return "no target app: call open_app(name) first (list_running_apps shows what is running)" }
     let ae = AXUIElementCreateApplication(p)
     var out = ["app: \(app.localizedName ?? "?")"]
     var w: AXUIElement? = nil
@@ -376,6 +379,7 @@ func menuKids(_ e: AXUIElement) -> [AXUIElement] {
     return kids
 }
 func menus() -> String {
+    if pid() == 0 { return "no target app: call open_app first" }
     guard let bar = ax(appEl(), kAXMenuBarAttribute) else { return "no menu bar (Accessibility permission?)" }
     var out: [String] = []
     for m in (ax(bar as! AXUIElement, kAXChildrenAttribute) as? [AXUIElement]) ?? [] {
@@ -392,6 +396,7 @@ func menus() -> String {
     return out.joined(separator: "\n")
 }
 func pressMenu(_ path: [String]) -> String {
+    if pid() == 0 { return "no target app: call open_app first" }
     guard let bar = ax(appEl(), kAXMenuBarAttribute) else { return "no menu bar" }
     var cur = bar as! AXUIElement
     var kids = (ax(cur, kAXChildrenAttribute) as? [AXUIElement]) ?? []
