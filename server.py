@@ -208,20 +208,40 @@ def annotate(text, from_tree=True, full=False):
     _prev_lines.clear(); _prev_lines.update(cur)
     return "\n".join(out)
 
-ROLE_RANK = ["Button", "Link", "MenuItem", "Row", "CheckBox", "SearchBox", "TextField", "ComboBox", "TextArea", "PopUpButton", "RadioButton", "Tab"]
+ROLE_RANK = ["SearchBox", "Button", "Link", "MenuItem", "Row", "CheckBox", "TextField", "ComboBox", "TextArea", "PopUpButton", "RadioButton", "AddressBar"]
 def resolve_text(text, wait=4.0):
     """Find an element by (case-insensitive) label on the CURRENT screen, re-reading until it shows up.
     Lets a batch target controls that did not exist when the batch was planned (search results, dialogs)."""
-    q = str(text).lower().strip(); deadline = time.time() + wait
+    q = str(text).lower().strip().strip('"'); deadline = time.time() + wait
+    # "search box", "the play button", "text field": a role, optionally with words from the name
+    ROLE_WORDS = {"searchbox": "SearchBox", "search box": "SearchBox", "search field": "SearchBox", "search bar": "SearchBox",
+                  "address bar": "AddressBar", "url bar": "AddressBar", "text field": "TextField", "textfield": "TextField",
+                  "text area": "TextArea", "textarea": "TextArea", "button": "Button", "link": "Link", "checkbox": "CheckBox",
+                  "row": "Row", "menu item": "MenuItem", "tab": "RadioButton", "field": "TextField"}
+    role_want, words = None, q
+    for rw in sorted(ROLE_WORDS, key=len, reverse=True):
+        if q == rw or q.endswith(" " + rw) or q == "the " + rw:
+            role_want = ROLE_WORDS[rw]; words = q[: -len(rw)].strip().removeprefix("the ").strip(); break
     while True:
         annotate(overlay({"op": "tree"}))  # refresh REFS (same stable numbering)
-        hits = [(k, v) for k, v in REFS.items() if q in v["line"].lower()]
+        def score(v):
+            line = v["line"].lower(); role = v["line"].split(" ")[0]
+            name = line.split('"')[1] if '"' in line else ""
+            if q and q == name: return 0
+            if q and q in line: return 1
+            if role_want and (role == role_want or (role_want == "TextField" and role in ("SearchBox", "TextArea", "ComboBox"))):
+                if not words or all(w in line for w in words.split()): return 2
+                return 4  # right kind of control, words did not match: better than nothing ("title field" -> the text area)
+            ws = [w for w in words.split() if len(w) > 2]
+            if ws and all(w in line for w in ws): return 3
+            return None
+        hits = [(score(v), k, v) for k, v in REFS.items()]
+        hits = [h for h in hits if h[0] is not None]
         if hits:
             def rank(h):
-                role = h[1]["line"].split(" ")[0]
-                exact = f'"{q}"' in h[1]["line"].lower()
-                return (0 if exact else 1, ROLE_RANK.index(role) if role in ROLE_RANK else 50, h[1]["idx"])
-            return sorted(hits, key=rank)[0][0]
+                role = h[2]["line"].split(" ")[0]
+                return (h[0], ROLE_RANK.index(role) if role in ROLE_RANK else 50, h[2]["idx"])
+            return sorted(hits, key=rank)[0][1]
         if time.time() > deadline:
             raise ValueError(f'no element containing "{text}" on the screen (waited {wait:.0f}s). Read the screen and use what is there.')
         time.sleep(0.5)
@@ -285,7 +305,7 @@ def after_action(before, verb):
     w0 = next((l[8:] for l in before.split("\n") if l.startswith("window: ")), "")
     w1 = next((l[8:] for l in now.split("\n") if l.startswith("window: ")), "")
     if w1 and w1 != w0:
-        verb += f'. GOAL CHECK: the window is now "{w1}". If that is what the task asked for, call done now.'
+        verb += f'. The window is now "{w1}". Check the screen: if the task is complete, call done; if not, continue.'
     return f"{verb}\n\n" + now
 
 def go_click(a, count=1, button="left"):
@@ -313,8 +333,8 @@ APP_ALIASES = {"system preferences": "System Settings", "settings": "System Sett
                "chrome": "Google Chrome", "vscode": "Visual Studio Code", "vs code": "Visual Studio Code", "itunes": "Music",
                "text edit": "TextEdit", "browser": "Safari", "files": "Finder"}
 TARGET = {"app": ""}
-def target(app):
-    for _ in range(20):  # wait for the process, then aim all input at it
+def target(app, tries=20):
+    for _ in range(tries):  # wait for the process, then aim all input at it
         if overlay({"op": "target", "app": app}) != "not running": TARGET["app"] = app; return True
         time.sleep(0.4)
     return False
@@ -365,9 +385,13 @@ def ensure_accessible(app, t):
     if not empty_tree(t) or app in RELAUNCHED or not is_chromium(app): return t
     RELAUNCHED.add(app)
     osa(f'tell application {json.dumps(app)} to quit'); time.sleep(2)
-    sh(f'open -g -a {json.dumps(app)} --args --force-renderer-accessibility'); time.sleep(4)
-    target(app)
-    return f"({app} was relaunched with accessibility enabled)\n" + screen_read(wait_window=10, full=True)
+    sh(f'open -g -a {json.dumps(app)} --args --force-renderer-accessibility')
+    target(app, tries=60)  # Electron/CEF apps take a while to come up
+    t = screen_read(wait_window=10, full=True)
+    for _ in range(20):  # and a while longer to publish their tree
+        if not empty_tree(t): break
+        time.sleep(0.5); t = screen_read(full=True)
+    return f"({app} was relaunched with accessibility enabled)\n" + t
 
 GUI_ACTIONS = {"click", "double_click", "right_click", "hover", "move_mouse", "drag", "form_input", "type_text", "press_key", "scroll", "menu"}
 def run_tool(name, a, cfg):
@@ -490,7 +514,8 @@ def run_tool(name, a, cfg):
         before = overlay({"op": "tree"})
         foc = next((l for l in before.split("\n") if l.startswith("focused:")), "focused: nothing")
         if not re.search(r"focused: (TextField|TextArea|ComboBox|SearchField|SearchBox|AddressBar|SecureTextField|WebArea)", foc):
-            fields = [f"[{k}] {v['line']}" for k, v in REFS.items() if re.search(r"^(TextField|TextArea|ComboBox|SearchField|search|text|textarea|email|url|password)\b", v["line"])]
+            fields = [f"[{k}] {v['line']}" for k, v in REFS.items() if re.search(r"^(SearchBox|TextField|TextArea|SearchField|search|text|textarea|email|url|password)\b", v["line"])]
+            fields.sort(key=lambda l: 0 if "SearchBox" in l else 1)
             return (f"nothing typed: no text field has focus ({foc}). Click a text field first, then type_text."
                     + ("\nText fields on this screen:\n" + "\n".join(fields[:8]) if fields else ""))
         overlay({"op": "show"})
@@ -501,7 +526,11 @@ def run_tool(name, a, cfg):
         else:
             overlay({"op": "type", "text": a["text"]})
         if a.get("press_enter"): overlay({"op": "key", "key": "return", "mods": []})
-        time.sleep(0.5); return after_action(clip(annotate(before)), "typed")
+        time.sleep(0.5)
+        out = after_action(clip(annotate(before)), "typed")
+        if "focused: SearchBox" in out or "focused: AddressBar" in out:
+            out = out.replace("typed", 'typed into the search box. Press key("return") to run the search, then click the result you want.', 1)
+        return out
     if name == "press_key":
         before = overlay({"op": "tree"}); overlay({"op": "show"})
         for _ in range(max(1, min(int(a.get("repeat", 1)), 50))):
@@ -603,8 +632,13 @@ def compact_call(name, a, cfg):
     if name == "look": return run_tool("screen_read", {}, cfg)
     if name == "click":
         t = str(a.get("target") or a.get("ref") or a.get("text") or "").strip()
-        m = re.match(r'^\[?(ref_\d+)\]', t) or re.match(r'^(?:\w+\s+)?(?:=\s*)?()"([^"]*)"', t)  # pasted a screen line: take its ref, else its quoted name
-        if m: t = m.group(1) or m.group(2)
+        m = re.match(r'^\[?(ref_\d+)\]?\s*(?:\w+\s+)?(?:=\s*)?"([^"]*)"', t)  # pasted a screen line with ref and name
+        if m:
+            ref, name = m.group(1), m.group(2)
+            t = ref if ref in REFS and name.lower() in REFS[ref]["line"].lower() else name  # the ref must actually be that element
+        else:
+            m = re.match(r'^\[?(ref_\d+)\]', t) or re.match(r'^(?:\w+\s+)?(?:=\s*)?()"([^"]*)"', t)
+            if m: t = m.group(1) or m.group(2)
         return run_tool("click", {"ref": t} if re.fullmatch(r"(ref_)?\d+", t) else {"text": t}, cfg)
     if name == "type":
         text = str(a.get("text", "")).replace("\\n", "\n")
@@ -721,7 +755,8 @@ def agent(messages, cfg, emit):
                     msgs[i]["content"] = c.split("\n")[0][:200] + "\n(older screen omitted)"
         body = {"model": cfg["model"], "messages": msgs, "keep_alive": "30m",
                 # num_predict caps runaway generation: a stuck small model otherwise burns the GPU for minutes
-                "options": {"temperature": 0.1, "num_ctx": int(cfg.get("num_ctx") or NUM_CTX), "num_predict": 1024}}
+                "options": {"temperature": 0.1, "num_ctx": int(cfg.get("num_ctx") or NUM_CTX),
+                            "num_predict": 1024 + (8192 if budget is None else budget // 3) if think else 1024}}
         if think is not None: body["think"] = think
         if not prompt_tools: body["tools"] = tools
         t0 = time.time()
@@ -751,28 +786,49 @@ def agent(messages, cfg, emit):
                 emit({"type": "text", "content": f"Ollama error: {e}"}); return
             emit({"type": "text", "content": f"Ollama error: {e}"}); return
         print(f"  model {time.time() - t0:.1f}s calls={len(m.get('tool_calls') or [])} text={len(m.get('content') or '')} {m.get('done_reason', '')}", file=sys.stderr)
+        if m.get("done_reason") == "length" and not m.get("tool_calls"):
+            # Ran into the token cap without deciding anything (some models reason in the content channel, where the
+            # thinking budget cannot reach). Give this step one much longer run, then stop rather than loop.
+            note = (m.get("thinking") or m.get("content") or "")[-1200:]
+            emit({"type": "thinking", "content": note + "\n[ran out of tokens while reasoning: one longer attempt]"})
+            big = dict(body, options=dict(body["options"], num_predict=6144))
+            try: m = chat_stream(big, lambda s: emit({"type": "delta", "content": s}))
+            except Exception as e: emit({"type": "text", "content": f"Ollama error: {e}"}); return
+            if m.get("done_reason") == "length" and not m.get("tool_calls"):
+                emit({"type": "text", "content": "This model could not decide on an action within its token limit (it reasons at length in its "
+                      "reply). Try a lower reasoning setting or a different model."}); return
+            m.pop("done_reason", None)
         m.pop("done_reason", None)
         if m.get("thinking"): emit({"type": "thinking", "content": m["thinking"]})
         msgs.append(m)
         calls = m.get("tool_calls") or []
         if not calls and m.get("content"):
             calls = fake_calls(m["content"])
+            dm = re.search(r'\bdone\(\s*(?:result\s*[:=]\s*)?["\u201c](.*?)["\u201d]\s*\)', m["content"], re.S)
+            if not calls and dm: calls = [{"function": {"name": "done", "arguments": {"result": dm.group(1)}}}]
         if not calls:
             text = (m.get("content") or "").strip()
             # Small models often go silent, ask a question, or announce a plan right after a tool result instead of
             # continuing. Nudge them back into the task a few times before giving up.
             stalled = not text or re.search(r"\b(I'll|I will|let me|let's|next,? I|now I|going to|I need to|could you|please (provide|specify|clarify)|which (task|specific))\b", text, re.I)
-            if acted and nudges < 3 and stalled:
+            narrating = len(text) > 600 and re.match(r"(Okay|Alright|Let me|Let's|The user|First,)", text)  # reasoning leaked into the reply
+            if narrating and not acted:
+                emit({"type": "thinking", "content": text}); text = ""; stalled = True
+            if acted and nudges < (1 if compact else 3) and stalled:
                 nudges += 1
                 msgs.append({"role": "user", "content": f"[system] Task: \"{task}\". Look at the tool results above: they show what has ALREADY happened, do not repeat those calls. If the task is complete, reply now with a 1-2 sentence report. Otherwise continue with the next tool call. Never ask questions."})
                 continue
             # Small models like to declare victory after merely navigating to the right place. Make them check the
             # evidence once before the report is accepted.
-            if acted and text and not verified and not compact:
+            if acted and text and not verified:
                 verified = True
-                msgs.append({"role": "user", "content": f"[system] Verify before finishing. Task: \"{task}\". Look at the LATEST screen dump: does it prove the task is done (the right control shows (selected)/on, the text/value you wanted is present)? If not, continue with tool calls: click the exact control by ref. If it is proven, repeat your short report."})
+                msgs.append({"role": "user", "content": f"[system] Verify before finishing. Task: \"{task}\". Does the LATEST screen prove it is done (the right control shows (selected)/on, the window or text you wanted is there)? If not, continue with tool calls. If it is proven, call done" + ("." if compact else " (reply with your short report).")})
                 continue
+            if not text and not acted and narrating and nudges < 1:
+                nudges += 1
+                msgs.append({"role": "user", "content": "[system] That was reasoning, not an action. Reply with the tool call for the first step only."}); continue
             if text: emit({"type": "text", "content": text})
+            elif narrating: emit({"type": "text", "content": "This model reasoned at length without taking an action. Try a lower reasoning setting or a different model."})
             return
         acted = True
         if prompt_tools:  # keep the JSON out of the chat, and feed results back as a user turn
@@ -783,6 +839,11 @@ def agent(messages, cfg, emit):
                 try: args = json.loads(args)
                 except Exception: args = {}
             if fn["name"] == "done":  # explicit finish: no nudges, no verification loop
+                if len(calls) > 1:  # planned blind together with actions: ignore it, the screen after them decides
+                    emit({"type": "tool", "name": "done", "args": args})
+                    res = "ignored: done must be the only call in a reply. Look at the screen after your actions, then call done by itself."
+                    emit({"type": "result", "name": "done", "result": res})
+                    msgs.append({"role": "user" if prompt_tools else "tool", "content": (f"[tool result of done]\n" if prompt_tools else "") + res}); continue
                 emit({"type": "text", "content": str(args.get("result") or args.get("summary") or "Done.")}); return
             emit({"type": "tool", "name": fn["name"], "args": args})
             key = (fn["name"], json.dumps(args, sort_keys=True))
@@ -816,11 +877,12 @@ def agent(messages, cfg, emit):
                 except Exception as e: res = f"error: {e}"
             last_call = key
             if fn["name"] in ONCE_TOOLS and key not in done_calls and not res.startswith("error") and "did not start" not in res: done_calls[key] = res
-            if c is not calls[-1] and "\n" in res and not res.startswith(("error", "nothing typed")):
-                res = res.split("\n")[0]  # intermediate steps: status only, the last call carries the screen
+            failed = res.startswith(("error", "nothing typed", "no target app", "refused", "blocked", "No app called", "unknown"))
+            if c is not calls[-1] and "\n" in res and not failed and fn["name"] in GUI_ACTIONS:
+                res = res.split("\n")[0]  # intermediate actions: status only; reads, opens and the last call keep their screen
             emit({"type": "result", "name": fn["name"], "result": res})
-            if res.startswith(("error", "nothing typed")) and c is not calls[-1]:
-                msgs.append({"role": "user" if prompt_tools else "tool", "content": (f"[tool result of {fn['name']}]\n" if prompt_tools else "") + res + "\n(remaining calls in this reply were skipped)"}); break
+            if failed and c is not calls[-1]:
+                msgs.append({"role": "user" if prompt_tools else "tool", "content": (f"[tool result of {fn['name']}]\n" if prompt_tools else "") + res + "\n(the remaining calls in this reply were skipped: fix this first)"}); break
             msgs.append({"role": "user" if prompt_tools else "tool", "content": (f"[tool result of {fn['name']}]\n" if prompt_tools else "") + str(res)})
     emit({"type": "text", "content": "(stopped: step limit reached)"})
 
