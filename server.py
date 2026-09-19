@@ -555,7 +555,7 @@ def compact_call(name, a, cfg):
     if name == "look": return run_tool("screen_read", {}, cfg)
     if name == "click":
         t = str(a.get("target") or a.get("ref") or a.get("text") or "").strip()
-        m = re.match(r'^(?:\[?(ref_\d+)\]?\s*)?(?:\w+\s+)?"([^"]*)"', t)  # pasted a whole screen line: take the ref, else the quoted name
+        m = re.match(r'^\[?(ref_\d+)\]', t) or re.match(r'^(?:\w+\s+)?(?:=\s*)?()"([^"]*)"', t)  # pasted a screen line: take its ref, else its quoted name
         if m: t = m.group(1) or m.group(2)
         return run_tool("click", {"ref": t} if re.fullmatch(r"(ref_)?\d+", t) else {"text": t}, cfg)
     if name == "type":
