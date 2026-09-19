@@ -115,16 +115,23 @@ async function gotoPlayer(name) {
   await go(new goals.GoalFollow(pl.entity, 2), 30000);
   return `standing next to ${pl.username}`;
 }
+const CLAIMS = new Map();  // "x,y,z" -> bot name: blocks another bot is already working on
 function findBlocks(name, count, maxDistance = 32) {
   name = name.toLowerCase().replace(/s$/, '').replace(/^wood$/, 'log').replace(/^tree$/, 'log');  // logs, trees, stones...
   const ids = bot.registry.blocksByName[name] ? [bot.registry.blocksByName[name].id]
     : Object.values(bot.registry.blocksByName).filter(b => b.name.includes(name)).map(b => b.id);
   if (!ids.length) throw new Error(`unknown block "${name}"`);
-  return bot.findBlocks({ matching: ids, maxDistance, count });
+  const me = bot.username;
+  return bot.findBlocks({ matching: ids, maxDistance, count: count + 8 }).filter(p => { const c = CLAIMS.get(V(p)); return !c || c === me; }).slice(0, count);
 }
 async function digOne(pos) {
   const b = bot.blockAt(pos);
   if (!b || b.name === 'air') return false;
+  const key = V(pos); if (CLAIMS.get(key) && CLAIMS.get(key) !== bot.username) return false;
+  CLAIMS.set(key, bot.username); setTimeout(() => CLAIMS.delete(key), 20000);
+  try { return await digOneInner(pos, b); } finally { CLAIMS.delete(key); }
+}
+async function digOneInner(pos, b) {
   if (!bot.canDigBlock(b) || bot.entity.position.distanceTo(pos) > 4.2) {
     await go(new goals.GoalLookAtBlock(pos, bot.world, { reach: 4 }), 10000);
   }
@@ -156,7 +163,9 @@ async function collect(name, count) {
   for (let tries = 0; got < count && tries < count * 3; tries++) {
     const found = findBlocks(name, 8);
     if (!found.length) throw new Error(`no ${name} within 32 blocks (collected ${got}). Try another block that is nearby (see nearby_blocks): dirt and stone are almost always available`);
-    found.sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position));
+    const p = bot.entity.position, others = Object.values(BOTS).map(e => e.bot).filter(o => o !== bot && o.entity);
+    found.sort((a, b) => (a.distanceTo(p) + 0.5 * others.reduce((s, o) => s + Math.max(0, 6 - a.distanceTo(o.entity.position)), 0))
+                       - (b.distanceTo(p) + 0.5 * others.reduce((s, o) => s + Math.max(0, 6 - b.distanceTo(o.entity.position)), 0)));
     if (await digOne(found[0])) { got++; await sleep(150); await pickUp(); }
   }
   await pickUp();

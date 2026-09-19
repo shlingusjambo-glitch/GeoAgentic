@@ -555,6 +555,11 @@ def minecraft(cmd, bot=None):
     elif a == "stop": q = {"action": "stop"}
     else: return 'unknown minecraft action. Use: ' + MC_HELP
     if a == "craft" and rest and rest[0].startswith("craft_"): q["item"] = rest[0][6:]  # "craft_stick" -> stick
+    if q["action"] == "chat":
+        key = bot or "_"
+        if LAST_SAY.get(key) == q["text"].strip().lower():
+            return "not sent: you already said exactly that. Talking is not progress; do the action now (collect, craft, build, goto...)."
+        LAST_SAY[key] = q["text"].strip().lower()
     if bot: q["bot"] = bot
     if q["action"] == "connect" and bot and not q.get("username"): q["username"] = bot
     r = mcbot(q)
@@ -1017,6 +1022,7 @@ NO_TOOLS = set()  # models Ollama refused to run with a tools array
 MC_BOT_NAMES = ["Geo", "Ada", "Kai", "Mira", "Rex", "Zed"]
 MC_ROUNDS = 60  # standing-objective rounds per prompt (Stop in the menu bar ends it earlier)
 MC_SESSIONS = {}  # bot name -> its conversation (persists across prompts until reset)
+LAST_SAY = {}     # bot name -> last chat line, to refuse repeats
 MC_TOOLS = [
     T("minecraft", "Act in the world. action: " + MC_HELP + ". Every result includes your position, inventory, surroundings and recent chat.", {"action": S}, ["action"]),
     T("done", "Finish this task with a one-sentence report.", {"result": S}, ["result"]),
@@ -1034,18 +1040,26 @@ Rules
 - Chat: minecraft("say ...") is public in-game chat that the user and the other bots read. Use it to coordinate
   ({coord}) and to answer people. Messages addressed to you in recent_chat are requests: act on them.
 - come walks to the user. goto x y z walks anywhere. state re-reads the world.
-- Your FIRST action on a new task with teammates is say("<name>: I'll ...") stating your part. Then do it.
+- Talking is not working. Say things that matter (a need, a location, a finished step), then ACT. Never repeat
+  an announcement. A round with only chat achieves nothing and done will be refused.
 
 Survival playbook (in order; skip what is done): logs (collect oak_log 8, or any *_log) -> craft crafting_table ->
 craft stick -> craft wooden_pickaxe -> collect stone 20 -> craft stone_pickaxe, stone_axe, stone_sword -> a shelter
 before night (build house 4 <block>) -> food (kill animals: goto them; or collect wheat/apples) -> coal_ore, iron_ore ->
 craft furnace, iron tools. Do not gather endlessly: gather what the next step needs, then do the next step."""
 
+MC_ROLES = ["wood and tools: gather logs, craft the crafting table, sticks and pickaxes, then stone tools for everyone",
+            "shelter and building: gather dirt or cobblestone and build the house before night, then expand it",
+            "food and scouting: find and kill animals (goto them), collect apples/wheat, report what is around",
+            "mining: with a pickaxe from the tool-maker, mine stone, coal and iron and bring it back",
+            "farming and wood supply: collect logs and saplings, keep the team stocked with planks",
+            "defense: craft a sword, stay near the builder and fight mobs"]
+def mc_role(name, bots): return MC_ROLES[bots.index(name) % len(MC_ROLES)] if name in bots else MC_ROLES[0]
 def mc_prompt(name, bots):
     others = [b for b in bots if b != name]
-    team = (f"Your teammates {', '.join(others)} are also in the world, each with the same task. Split the work and say what you take, "
-            f"e.g. say(\"{name}: I'll gather dirt, you build\"). Do not all do the same thing.") if others else "You are the only bot."
-    coord = "who gathers, who builds, where to meet" if others else "reporting what you did"
+    team = ("Roles are already assigned; do not renegotiate them. Yours: " + mc_role(name, bots) + ". Teammates: " +
+            "; ".join(f"{o} ({mc_role(o, bots).split(':')[0]})" for o in others) + ".") if others else "You are the only bot: do everything, in playbook order."
+    coord = "progress, needs (\"I need a pickaxe\"), where things are" if others else "reporting what you did"
     return MC_SYSTEM.format(name=name, team=team, coord=coord)
 
 def mc_connect_all(n):
@@ -1075,7 +1089,7 @@ def minecraft_turn(messages, cfg, emit):
         hist = MC_SESSIONS.setdefault(name, [])
         hist.append({"role": "user", "content": task})
         sub = dict(cfg, tools="minecraft", _bot=name, _bots=names)
-        if len(names) > 1: minecraft(f"say {name}: got a new task: {task[:80]}", bot=name)  # everyone hears the assignment
+        if len(names) > 1: minecraft(f"say {name}: on it. My job: {mc_role(name, names).split(':')[0]}.", bot=name)  # the harness announces roles
         # A Minecraft task is a standing objective: when the bot finishes a step it gets the next round, until the
         # user presses Stop (the connection closes) or the round limit is hit.
         for rnd in range(MC_ROUNDS):
@@ -1107,6 +1121,7 @@ def agent(messages, cfg, emit, system=None, tools=None):
     last_call = None; same_reads = 0; done_calls = {}  # (name, args) -> result, for side-effecting tools
     call_count = {}; blocked = 0  # loop detection: identical calls anywhere in the turn
     fails = 0  # consecutive failed actions
+    worked = False  # a real (non-chat, non-read) action succeeded this turn
     for _ in range(MAX_STEPS):
         if sum(len(m.get("content") or "") for m in msgs) > 24000:  # only then; rewriting history defeats the prefix cache
             tool_idx = [i for i, m in enumerate(msgs) if m.get("role") == "tool" or (m.get("content") or "").startswith("[tool result")]
@@ -1182,6 +1197,9 @@ def agent(messages, cfg, emit, system=None, tools=None):
                 continue
             # Small models like to declare victory after merely navigating to the right place. Make them check the
             # evidence once before the report is accepted.
+            if mc_bot and text and not worked and nudges < 2:
+                nudges += 1
+                msgs.append({"role": "user", "content": "[system] That was talk, not work. Do the next real action now (collect/craft/build/goto), then report."}); continue
             if acted and text and not verified:
                 verified = True
                 msgs.append({"role": "user", "content": f"[system] Verify before finishing. Task: \"{task}\". Does the LATEST screen prove it is done (the right control shows (selected)/on, the window or text you wanted is there)? If not, continue with tool calls. If it is proven, call done" + ("." if compact else " (reply with your short report).")})
@@ -1201,6 +1219,11 @@ def agent(messages, cfg, emit, system=None, tools=None):
                 try: args = json.loads(args)
                 except Exception: args = {}
             if fn["name"] == "done":  # explicit finish: no nudges, no verification loop
+                if mc_bot and not worked:
+                    emit({"type": "tool", "name": "done", "args": args})
+                    res = "refused: you have not done any work this round, only talked or looked. Do a real action first (collect, craft, build, goto, dig, place)."
+                    emit({"type": "result", "name": "done", "result": res})
+                    msgs.append({"role": "user" if prompt_tools else "tool", "content": (f"[tool result of done]\n" if prompt_tools else "") + res}); continue
                 if fails >= 2:
                     emit({"type": "tool", "name": "done", "args": args})
                     res = (f"refused: your last {fails} actions all failed (see their results); nothing you described has happened. "
@@ -1247,6 +1270,7 @@ def agent(messages, cfg, emit, system=None, tools=None):
             last_call = key
             failed = res.startswith(("error", "nothing typed", "no target app", "refused", "blocked", "No app called", "unknown"))
             fails = fails + 1 if failed else 0
+            if not failed and fn["name"] not in READ_TOOLS and not res.startswith(("said:", "not sent", "me:")): worked = True
             if fn["name"] in ONCE_TOOLS and key not in done_calls and not failed and not re.search(r"did not start|not a folder|no such file|no \.app|copy failed|No app called", res): done_calls[key] = res
             if c is not calls[-1] and "\n" in res and not failed and fn["name"] in GUI_ACTIONS:
                 res = res.split("\n")[0]  # intermediate actions: status only; reads, opens and the last call keep their screen
