@@ -134,7 +134,30 @@ func panelPid() -> pid_t {
     return 0
 }
 func inputPid() -> pid_t { let p = panelPid(); return p != 0 ? p : pid() }
-func send(_ e: CGEvent?) { let p = inputPid(); if p != 0 { e?.postToPid(p) } }
+// System-input mode, for apps that ignore per-process events (OpenGL/GLFW games, some canvases): the target is
+// activated and events go through the real HID stream, so the user's cursor is borrowed for the moment of a click.
+var sysMode = false
+func sysActivate() {
+    if let a = NSRunningApplication(processIdentifier: pid()), !a.isActive { a.activate(); frame(0.35) }
+}
+func send(_ e: CGEvent?) {
+    let p = inputPid(); guard p != 0 else { return }
+    if sysMode { e?.post(tap: .cghidEventTap) } else { e?.postToPid(p) }
+}
+func sysClick(count: Int, right: Bool) {
+    sysActivate()
+    let saved = CGEvent(source: nil)?.location ?? pos
+    CGWarpMouseCursorPosition(pos); frame(0.05)
+    let btn: CGMouseButton = right ? .right : .left
+    for i in 1...max(1, count) {
+        let d = CGEvent(mouseEventSource: nil, mouseType: right ? .rightMouseDown : .leftMouseDown, mouseCursorPosition: pos, mouseButton: btn)
+        d?.setIntegerValueField(.mouseEventClickState, value: Int64(i)); d?.post(tap: .cghidEventTap)
+        let u = CGEvent(mouseEventSource: nil, mouseType: right ? .rightMouseUp : .leftMouseUp, mouseCursorPosition: pos, mouseButton: btn)
+        u?.setIntegerValueField(.mouseEventClickState, value: Int64(i)); u?.post(tap: .cghidEventTap)
+        frame(0.06)
+    }
+    frame(0.1); CGWarpMouseCursorPosition(saved)  // give the user their cursor back
+}
 // Sharing the Mac: the agent's input goes to its own app's process, so it only collides with the user when they
 // are working in that same app. In that case the agent waits until the user has been idle for a moment.
 func userActive() -> Bool {
@@ -219,6 +242,7 @@ func ripple() {
 func click(count: Int, right: Bool, mouse: Bool = false) {
     wobble(false); setRotation(0, scale: 0.82); frame(0.07)  // press
     let btn: CGMouseButton = right ? .right : .left
+    if sysMode { sysClick(count: count, right: right); ripple(); setRotation(0, scale: 1); wobble(true); return }
     let viaAX = !mouse && !right && count == 1 && axClick(pos)  // mouse=true forces real mouse events
     for i in stride(from: 1, through: count, by: 1) where !viaAX {  // count 0 = animation only
         let d = CGEvent(mouseEventSource: nil, mouseType: right ? .rightMouseDown : .leftMouseDown, mouseCursorPosition: pos, mouseButton: btn)
@@ -516,6 +540,18 @@ func handle(_ c: [String: Any]) -> String {
         AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid()), "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
         AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid()), "AXManualAccessibility" as CFString, kCFBooleanFalse)
         enabledAX.remove(pid())
+    case "window_id":  // the target app's largest on-screen window: CGWindowID and bounds (for screencapture -l)
+        guard pid() != 0, let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return "none" }
+        var best: (Int, CGRect)? = nil
+        for w in list where (w[kCGWindowOwnerPID as String] as? pid_t) == pid() && (w[kCGWindowLayer as String] as? Int ?? 0) == 0 {
+            guard let b = w[kCGWindowBounds as String] as? [String: CGFloat], let id = w[kCGWindowNumber as String] as? Int else { continue }
+            let r = CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0, width: b["Width"] ?? 0, height: b["Height"] ?? 0)
+            if best == nil || r.width * r.height > best!.1.width * best!.1.height { best = (id, r) }
+        }
+        guard let (id, r) = best else { return "none" }
+        return "\(id) \(Int(r.minX)) \(Int(r.minY)) \(Int(r.width)) \(Int(r.height))"
+    case "sysmode":
+        sysMode = c["on"] as? Bool ?? false
     case "state":
         return "pos=\(Int(pos.x)),\(Int(pos.y)) showing=\(showing) overTarget=\(overTarget()) alpha=\(win.alphaValue)"
     case "axscroll":  // scroll the largest scroll area in the window by moving its vertical scrollbar
@@ -550,10 +586,11 @@ func handle(_ c: [String: Any]) -> String {
         e?.location = pos; send(e)
     case "type":
         _ = yieldToUser()
+        if sysMode { sysActivate() }
         let text = c["text"] as? String ?? ""
         let f = focusedEl()
         let before = f.flatMap { ax($0, kAXValueAttribute) as? String }
-        if !axInsert(text) {
+        if sysMode || !axInsert(text) {
             for ch in text.utf16 {
                 var u = ch
                 for down in [true, false] {
@@ -572,6 +609,7 @@ func handle(_ c: [String: Any]) -> String {
         }
     case "key":
         _ = yieldToUser()
+        if sysMode { sysActivate() }
         let name = (c["key"] as? String ?? "").lowercased()
         if mediaKey(name) { return "ok" }
         guard let code = keyCode(name) else { return "unknown key" }

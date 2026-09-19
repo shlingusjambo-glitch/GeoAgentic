@@ -16,7 +16,8 @@ on. The agent and you share the Mac: its input goes only to the app it opened, i
 app, and if you are actively using that same app it waits until you pause.
 
 Requirements: macOS, Xcode CLT (`swiftc`), Ollama running with a tool-capable model (e.g. `qwen2.5`),
-optionally `moondream` for screenshots. Grant **Accessibility** (and **Screen Recording** for
+and a vision-capable model (e.g. `gemma4:e2b`) for apps with no accessibility tree, such as games: the agent
+screenshots the window and clicks by position. Grant **Accessibility** (and **Screen Recording** for
 screenshots) to the terminal you launch from. For `browser_read`, enable Chrome
 *View > Developer > Allow JavaScript from Apple Events*.
 
