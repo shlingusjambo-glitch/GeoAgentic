@@ -457,6 +457,23 @@ func handle(_ c: [String: Any]) -> String {
         return out.joined(separator: "\u{1}")
     case "state":
         return "pos=\(Int(pos.x)),\(Int(pos.y)) showing=\(showing) overTarget=\(overTarget()) alpha=\(win.alphaValue)"
+    case "axscroll":  // scroll the largest scroll area in the window by moving its vertical scrollbar
+        let dy = Double(c["dy"] as? Int ?? -5)
+        guard pid() != 0, let w = ax(appEl(), kAXFocusedWindowAttribute) ?? ax(appEl(), kAXMainWindowAttribute) else { return "no window" }
+        var best: AXUIElement? = nil; var bestArea: CGFloat = 0
+        func findScroll(_ e: AXUIElement, _ depth: Int) {
+            if depth > 25 { return }
+            if ax(e, kAXRoleAttribute) as? String == "AXScrollArea" {
+                let f = frame(e); if f.width * f.height > bestArea { bestArea = f.width * f.height; best = e }
+            }
+            for k in (ax(e, kAXChildrenAttribute) as? [AXUIElement]) ?? [] { findScroll(k, depth + 1) }
+        }
+        findScroll(w as! AXUIElement, 0)
+        guard let sa = best, let bar = ax(sa, kAXVerticalScrollBarAttribute) else { return "no scroll area" }
+        let b = bar as! AXUIElement
+        let cur = (ax(b, kAXValueAttribute) as? NSNumber)?.doubleValue ?? 0
+        let next = min(1, max(0, cur - dy * 0.06))  // dy negative = down; ~30% of the range per 5 lines
+        return AXUIElementSetAttributeValue(b, kAXValueAttribute as CFString, NSNumber(value: next)) == .success ? "ok" : "scrollbar refused"
     case "activate":  // last resort for apps that ignore background input: bring the target to front
         NSRunningApplication(processIdentifier: pid())?.activate(options: [.activateIgnoringOtherApps])
         usleep(400000)
