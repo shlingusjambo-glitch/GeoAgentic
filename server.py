@@ -976,6 +976,11 @@ def fake_calls(text):
         except Exception: pass
     for mt in re.finditer(r'\{\s*"name"\s*:\s*"(\w+)"\s*\}', text):  # bare call with no args
         if not any(a <= mt.start() < b for a, b in spans): found.append((mt.start(), mt.group(1), {}))
+    if not found:  # function-call prose: minecraft{action:collect dirt}, minecraft(action="say hi"), done("built it")
+        for mt in re.finditer(r'\b(minecraft|done|click|type|key|open|apps|look|media|file|see|scroll)\s*[\({]\s*(?:(\w+)\s*[:=]\s*)?["\u201c]?([^"\u201d)}]*)["\u201d]?\s*[\)}]', text):
+            name, key, val = mt.group(1), mt.group(2), mt.group(3).strip()
+            argkey = key or {"minecraft": "action", "done": "result", "click": "target", "type": "text", "key": "keys", "open": "app", "media": "action", "file": "action", "scroll": "direction"}.get(name)
+            found.append((mt.start(), name, {argkey: val} if argkey and val else {}))
     return [{"function": {"name": n, "arguments": a}} for _, n, a in sorted(found)]
 
 def tools_as_text(tools=None):
@@ -1017,7 +1022,13 @@ Rules
 - Survival first: if it is night and you are hurt, shelter then wait 60. Eat when hungry.
 - Chat: minecraft("say ...") is public in-game chat that the user and the other bots read. Use it to coordinate
   ({coord}) and to answer people. Messages addressed to you in recent_chat are requests: act on them.
-- come walks to the user. goto x y z walks anywhere. state re-reads the world."""
+- come walks to the user. goto x y z walks anywhere. state re-reads the world.
+- Your FIRST action on a new task with teammates is say("<name>: I'll ...") stating your part. Then do it.
+
+Survival playbook (in order; skip what is done): logs (collect oak_log 8, or any *_log) -> craft crafting_table ->
+craft stick -> craft wooden_pickaxe -> collect stone 20 -> craft stone_pickaxe, stone_axe, stone_sword -> a shelter
+before night (build house 4 <block>) -> food (kill animals: goto them; or collect wheat/apples) -> coal_ore, iron_ore ->
+craft furnace, iron tools. Do not gather endlessly: gather what the next step needs, then do the next step."""
 
 def mc_prompt(name, bots):
     others = [b for b in bots if b != name]
@@ -1053,8 +1064,11 @@ def minecraft_turn(messages, cfg, emit):
         hist = MC_SESSIONS.setdefault(name, [])
         hist.append({"role": "user", "content": task})
         sub = dict(cfg, tools="minecraft", _bot=name, _bots=names)
+        if len(names) > 1: minecraft(f"say {name}: got a new task: {task[:80]}", bot=name)  # everyone hears the assignment
         try: agent(hist, sub, bot_emit(name), system=mc_prompt(name, names), tools=MC_TOOLS)
         except Exception as ex: bot_emit(name)({"type": "text", "content": f"{name} stopped: {ex}"})
+        last = next((m.get("content") for m in reversed(hist) if m.get("role") == "assistant" and m.get("content")), "")
+        if last: minecraft(f"say {name}: {last[:100]}", bot=name)  # the report goes to the team and the user in-game
     threads = [threading.Thread(target=run_one, args=(nm,), daemon=True) for nm in names]
     for t in threads: t.start()
     for t in threads: t.join()

@@ -9,7 +9,14 @@ const { Vec3 } = require('vec3');
 
 // Several bots can live in one world; `bot` is the one the current request addresses (set per request).
 const BOTS = {};  // name -> { bot, chat: [], busy: null }
-let bot = null, lanPort = null, busy = null, lastChat = [], lastPlaceError = '';
+let lanPort = null, busy = null, lastPlaceError = '';
+// Requests for different bots run concurrently: `bot` and `lastChat` resolve through the current async context,
+// so one bot's action can never be hijacked by another's.
+const { AsyncLocalStorage } = require('async_hooks');
+const ctx = new AsyncLocalStorage();
+const fallback = { bot: null, chat: [] };
+Object.defineProperty(globalThis, 'bot', { get: () => (ctx.getStore() || fallback).bot, set: (v) => { (ctx.getStore() || fallback).bot = v; } });
+Object.defineProperty(globalThis, 'lastChat', { get: () => (ctx.getStore() || fallback).chat, set: (v) => { (ctx.getStore() || fallback).chat = v; } });
 function select(name) {
   const entry = name ? BOTS[name] : Object.values(BOTS)[0];
   bot = entry ? entry.bot : null; lastChat = entry ? entry.chat : [];
@@ -60,7 +67,7 @@ function state() {
 // Self-defense reflex: hit hostile mobs that come within reach, back away from creepers.
 const HOSTILE = new Set(['zombie', 'skeleton', 'spider', 'cave_spider', 'creeper', 'enderman', 'witch', 'drowned', 'husk', 'stray', 'phantom', 'slime', 'zombie_villager', 'pillager', 'vindicator']);
 let lastSwing = 0;
-function defendAll() { for (const e of Object.values(BOTS)) { const saved = bot; bot = e.bot; try { defend(); } catch (x) {} bot = saved; } }
+function defendAll() { for (const e of Object.values(BOTS)) ctx.run({ bot: e.bot, chat: e.chat }, () => { try { defend(); } catch (x) {} }); }
 function defend() {
   if (!bot || !bot.entity) return;
   const p = bot.entity.position;
@@ -320,10 +327,12 @@ http.createServer((req, res) => {
     const passive = ['state', 'stop', 'bots', 'connect'].includes(q.action);
     if (entry && entry.busy && !passive) return send({ ok: false, error: `still busy with: ${entry.busy}` });
     if (entry && !passive) entry.busy = q.action;
-    try { const r = await Promise.race([run(q), new Promise((_, rej) => setTimeout(() => rej(new Error('action timed out (300s)')), 300000))]);
-          select(q.bot); busy = entry ? entry.busy : null;
-          send({ ok: true, result: r, state: q.action === 'state' ? undefined : state() }); }
-    catch (e) { select(q.bot); send({ ok: false, error: e.message, state: state() }); }
-    finally { if (entry && !passive) entry.busy = null; }
+    await ctx.run({ bot: null, chat: [] }, async () => {
+      try { const r = await Promise.race([run(q), new Promise((_, rej) => setTimeout(() => rej(new Error('action timed out (300s)')), 300000))]);
+            select(q.bot);
+            send({ ok: true, result: r, state: q.action === 'state' ? undefined : state() }); }
+      catch (e) { select(q.bot); send({ ok: false, error: e.message, state: state() }); }
+      finally { if (entry && !passive) entry.busy = null; }
+    });
   });
 }).listen(8125, '127.0.0.1', () => console.log('mcbot on 8125'));
