@@ -540,6 +540,8 @@ def minecraft(cmd, bot=None):
     cmd = re.sub(r'^\s*(?:action\s*[:=]\s*)?["\u201c]?', "", cmd.strip()).strip('"\u201d ')
     if re.fullmatch(r"\w+(,\s*\w+\s*[:=]\s*[^,]+)+", cmd):  # "collect,block:oak_log,n:5" -> "collect oak_log 5"
         cmd = " ".join(p.split(":")[-1].strip() for p in cmd.split(",") if p.strip())
+    # "collect birch_log,n:10" or "craft wooden_pickaxe,n:1" -> strip the ,n:N suffix and keep it as the count arg
+    cmd = re.sub(r"^(\w+\s+\w+),\s*(?:n|count|num|amount)\s*[:=]\s*(\d+)\s*$", r"\1 \2", cmd, flags=re.I)
     verbs = ("connect", "state", "look", "where", "status", "come", "follow", "goto", "go", "collect", "gather", "mine", "dig", "place",
              "craft", "equip", "hold", "build", "say", "chat", "stop", "eat", "shelter", "wait", "attack", "hunt", "kill", "chest", "store",
              "take", "give", "drop", "smelt", "cook", "till", "plant", "harvest", "sleep", "wake", "explore", "scout", "find", "use",
@@ -1077,24 +1079,37 @@ MC_SYSTEM = """You are {name}, one of the players in the user's Minecraft surviv
 from TEXT: every result shows your position, health, food, inventory, nearby blocks, entities and recent chat.
 {team}
 
-How to act
-- Do things with tool calls; call done(result) when the current step is finished (you will get another round).
-- A result starting with "error" means the action did NOT happen; read the hint in it. Never assume success.
-- Use materials the state lists nearby. Dirt is always there. Stone and ores need a pickaxe.
-- Gathering is chunked: keep calling collect until you have enough. Errors tell you the exact next command.
-- Survival: eat when hungry, shelter (or sleep in a bed) at night if hurt, wear armor when you have it.
+Command syntax (EXACT — wrong syntax silently fails or errors):
+  collect oak_log 8      craft wooden_pickaxe    craft crafting_table    craft stick 4
+  craft stone_pickaxe    craft wooden_sword      collect dirt 16         collect cobblestone 8
+  equip wooden_pickaxe   equip wooden_sword      goto x y z              goto -13 64 -2
+  build house 5          build house 5 dirt      attack zombie           eat
+  say hello team         tell Ada I need logs    board Starting house    scout
+NEVER add commas, n:, or extra tokens: "collect oak_log 8" NOT "collect oak_log,n:8".
+
+Early-game playbook (first-time in world):
+  1. collect oak_log 8   (or birch_log — whatever is nearby)
+  2. craft crafting_table
+  3. craft stick 4
+  4. craft wooden_pickaxe
+  5. collect cobblestone 8   (now you have the pickaxe)
+  6. craft stone_pickaxe
+  7. craft stone_sword
+
+Rules:
+- A result starting "error" means the action did NOT happen; read the hint and do the corrected action immediately.
+- Stone/ore needs a pickaxe; dig dirt/sand without one.
+- Craft in order: logs → crafting_table → sticks → wooden_pickaxe → then stone tools.
+- Keep calling collect until you have enough; one call collects a chunk.
+- Call done(result) when YOUR step is finished; you will get another round automatically.
+- Eat when food < 14. Sleep when it is night and you are hurt. Wear any armor in your inventory.
 
 Talking
-- say <text> is public chat: the user and the other players read it. tell <player> <text> is private.
-- board shows the notice board; board <text> posts on it. It persists: use it for plans, rules, jobs, prices,
-  claims ("Ada owns the farm"), or anything the group wants to remember.
-- Talk when it matters: a need, a location, a finished step, a proposal, a disagreement. Do not repeat yourself.
+- say <text> is public chat. tell <player> <text> is private.
+- board shows the notice board; board <text> posts on it.
+- Talk only when it matters: a need, a finished step, a proposal. Do not repeat yourself.
 
-You are free people in this world. The survival basics are a starting point, not a script: logs -> crafting_table
--> stick -> wooden_pickaxe -> stone tools -> shelter -> food -> coal/iron -> furnace -> iron tools -> beds ->
-farms. Beyond that, decide together what you want: a town, roads, a trading post, jobs, currency (items are
-tradeable with give), laws on the board, exploring, mining for diamonds, fighting the dragon. Propose, argue,
-agree, and then build it."""
+You are free people in this world. Beyond the basics, decide together what you want."""
 
 MC_ROLES = ["wood and tools: gather logs, craft the crafting table, sticks and pickaxes, then stone tools for everyone",
             "shelter and building: gather dirt or cobblestone and build the house before night, then expand it",
@@ -1151,8 +1166,9 @@ def minecraft_turn(messages, cfg, emit):
             if last: minecraft(f"say {name}: {last[:100]}", bot=name)  # the report goes to the team and the user in-game
             if len(hist) > 40: del hist[1:-24]  # keep the context small over a long session
             time.sleep(3)
-            hist.append({"role": "user", "content": f"[round {rnd + 2}] Objective: \"{task}\". Read the latest chat (and the board now and then), check state, "
-                                                    "then do what you think is most useful next. Call done when that step is finished."})
+            hist.append({"role": "user", "content": f"[round {rnd + 2}] Objective: \"{task}\". Check state, read chat, then do the most useful next action. "
+                                                    "Syntax reminder: 'collect oak_log 8', 'craft wooden_pickaxe', 'equip wooden_pickaxe' — no commas or n:. "
+                                                    "Call done when YOUR step is finished."})
     threads = [threading.Thread(target=run_one, args=(nm,), daemon=True) for nm in names]
     for t in threads: t.start()
     for t in threads: t.join()
@@ -1324,6 +1340,7 @@ def agent(messages, cfg, emit, system=None, tools=None):
             failed = res.startswith(("error", "nothing typed", "no target app", "refused", "blocked", "No app called", "unknown"))
             fails = fails + 1 if failed else 0
             if not failed and fn["name"] not in READ_TOOLS and not res.startswith(("said:", "not sent", "me:", "posted.", "NOTICE", "whispered")): worked = True
+            if not failed and fn["name"] == "minecraft" and res.startswith("waited"): worked = True  # deliberate wait counts as doing something
             if res.startswith(("said:", "posted.", "whispered")): talked = True
             if fn["name"] in ONCE_TOOLS and key not in done_calls and not failed and not re.search(r"did not start|not a folder|no such file|no \.app|copy failed|No app called", res): done_calls[key] = res
             if c is not calls[-1] and "\n" in res and not failed and fn["name"] in GUI_ACTIONS:
