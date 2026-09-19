@@ -388,7 +388,8 @@ def run_tool(name, a, cfg):
     if name == "list_running_apps":
         apps = overlay({"op": "apps_detail"})
         apps = re.sub(r"^((?:" + "|".join(map(re.escape, BROWSERS)) + r") — " + OWN_UI + r"(?: |$).*)$", r"\1  <- your own chat UI, never operate it", apps, flags=re.M)
-        return "Running apps (name — window title):\n" + apps + "\nInput currently targets: " + (TARGET["app"] or "nothing (open_app first)")
+        return ("Running apps (name — window title):\n" + apps + "\nInput currently targets: " + (TARGET["app"] or "nothing (open_app first)")
+                + "\nAny app can be opened by name with open, whether or not it is listed here.")
     if name == "menus": return overlay({"op": "menus"})
     if name == "menu":
         p = a.get("path") or []
@@ -458,7 +459,13 @@ def run_tool(name, a, cfg):
             fields = [f"[{k}] {v['line']}" for k, v in REFS.items() if re.search(r"^(TextField|TextArea|ComboBox|SearchField|search|text|textarea|email|url|password)\b", v["line"])]
             return (f"nothing typed: no text field has focus ({foc}). Click a text field first, then type_text."
                     + ("\nText fields on this screen:\n" + "\n".join(fields[:8]) if fields else ""))
-        overlay({"op": "show"}); overlay({"op": "type", "text": a["text"]})
+        overlay({"op": "show"})
+        # A search box / combo box with leftover text gets replaced (nobody appends to a search query); documents append.
+        if re.search(r'focused: (ComboBox|SearchField|TextField "[^"]*[Ss]earch[^"]*") = "[^"]+"', foc) and not a.get("append"):
+            if overlay({"op": "setvalue", "value": a["text"]}) != "ok":
+                overlay({"op": "key", "key": "a", "mods": ["cmd"]}); overlay({"op": "type", "text": a["text"]})
+        else:
+            overlay({"op": "type", "text": a["text"]})
         if a.get("press_enter"): overlay({"op": "key", "key": "return", "mods": []})
         time.sleep(0.5); return after_action(clip(annotate(before)), "typed")
     if name == "press_key":
@@ -739,7 +746,7 @@ def agent(messages, cfg, emit):
             emit({"type": "tool", "name": fn["name"], "args": args})
             key = (fn["name"], json.dumps(args, sort_keys=True))
             call_count[key] = call_count.get(key, 0) + 1
-            if call_count[key] > 2 and fn["name"] not in ("wait", "batch"):
+            if call_count[key] > (5 if fn["name"] == "scroll" else 2) and fn["name"] not in ("wait", "batch"):
                 blocked += 1
                 if blocked >= 3:
                     emit({"type": "result", "name": fn["name"], "result": "blocked: repeated call"})
