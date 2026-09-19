@@ -325,8 +325,6 @@ def go_click(a, count=1, button="left"):
     if count == 1 and button == "left":
         if overlay({"op": "tree"}) == before:
             overlay({"op": "click", "count": 1, "button": "left", "mouse": True}); time.sleep(0.6)
-        if overlay({"op": "tree"}) == before:
-            overlay({"op": "activate"}); overlay({"op": "click", "count": 1, "button": "left", "mouse": True}); time.sleep(0.6)
     return before
 
 APP_ALIASES = {"system preferences": "System Settings", "settings": "System Settings", "preferences": "System Settings",

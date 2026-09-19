@@ -135,6 +135,22 @@ func panelPid() -> pid_t {
 }
 func inputPid() -> pid_t { let p = panelPid(); return p != 0 ? p : pid() }
 func send(_ e: CGEvent?) { let p = inputPid(); if p != 0 { e?.postToPid(p) } }
+// Sharing the Mac: the agent's input goes to its own app's process, so it only collides with the user when they
+// are working in that same app. In that case the agent waits until the user has been idle for a moment.
+func userActive() -> Bool {
+    let idle = min(CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown),
+                   CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseDown),
+                   CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .mouseMoved),
+                   CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .scrollWheel))
+    return idle < 1.0
+}
+func yieldToUser() -> Bool {  // returns true if it had to wait
+    let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    guard pid() != 0, front == pid() else { return false }
+    var waited = 0.0
+    while userActive() && waited < 15 { frame(0.25); waited += 0.25 }
+    return waited > 0
+}
 func appEl() -> AXUIElement { AXUIElementCreateApplication(inputPid()) }
 func focusedEl() -> AXUIElement? {
     if pid() == 0 { return nil }
@@ -449,10 +465,13 @@ func handle(_ c: [String: Any]) -> String {
     case "apps_detail":
         return appsDetail()
     case "move":
+        _ = yieldToUser()
         fly(to: CGPoint(x: c["x"] as? Double ?? pos.x, y: c["y"] as? Double ?? pos.y))
     case "click":
+        _ = yieldToUser()
         click(count: c["count"] as? Int ?? 1, right: c["button"] as? String == "right", mouse: c["mouse"] as? Bool ?? false)
     case "press":
+        _ = yieldToUser()
         return pressRef(c["index"] as? Int ?? 0)
     case "axinfo":  // debug: actions and attributes of the element under a point
         var el: AXUIElement?
@@ -516,18 +535,21 @@ func handle(_ c: [String: Any]) -> String {
         let cur = (ax(b, kAXValueAttribute) as? NSNumber)?.doubleValue ?? 0
         let next = min(1, max(0, cur - dy * 0.06))  // dy negative = down; ~30% of the range per 5 lines
         return AXUIElementSetAttributeValue(b, kAXValueAttribute as CFString, NSNumber(value: next)) == .success ? "ok" : "scrollbar refused"
-    case "activate":  // last resort for apps that ignore background input: bring the target to front
-        NSRunningApplication(processIdentifier: pid())?.activate(options: [.activateIgnoringOtherApps])
-        usleep(400000)
+    case "activate":  // kept for compatibility; the agent never takes the user's focus
+        return "disabled"
     case "drag":
+        _ = yieldToUser()
         drag(to: CGPoint(x: c["x"] as? Double ?? pos.x, y: c["y"] as? Double ?? pos.y))
     case "setvalue":
+        _ = yieldToUser()
         return axSetValue(c["value"] as? String ?? "") ? "ok" : "unsupported"
     case "scroll":
+        _ = yieldToUser()
         let dy = Int32(c["dy"] as? Int ?? -5)
         let e = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: dy, wheel2: 0, wheel3: 0)
         e?.location = pos; send(e)
     case "type":
+        _ = yieldToUser()
         let text = c["text"] as? String ?? ""
         let f = focusedEl()
         let before = f.flatMap { ax($0, kAXValueAttribute) as? String }
@@ -549,6 +571,7 @@ func handle(_ c: [String: Any]) -> String {
             }
         }
     case "key":
+        _ = yieldToUser()
         let name = (c["key"] as? String ?? "").lowercased()
         if mediaKey(name) { return "ok" }
         guard let code = keyCode(name) else { return "unknown key" }
@@ -568,6 +591,7 @@ func handle(_ c: [String: Any]) -> String {
     case "menus":
         return menus().replacingOccurrences(of: "\n", with: "\u{1}")
     case "menu":
+        _ = yieldToUser()
         return pressMenu(c["path"] as? [String] ?? [])
     case "hide": showing = false; wobble(false); win.orderOut(nil)
     case "show": showing = true; place(); win.orderFrontRegardless(); wobble(true)
