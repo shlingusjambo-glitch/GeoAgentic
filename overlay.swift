@@ -84,6 +84,38 @@ func pidFor(_ name: String) -> pid_t {
 func runningApps() -> String {
     NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.compactMap { $0.localizedName }.joined(separator: ", ")
 }
+// One line per running app: name, front window title, frontmost marker. Cheap way to see what the user is doing.
+func appsDetail() -> String {
+    let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    var out: [String] = []
+    for a in NSWorkspace.shared.runningApplications where a.activationPolicy == .regular {
+        guard let n = a.localizedName else { continue }
+        let ae = AXUIElementCreateApplication(a.processIdentifier)
+        var title = ""
+        if let w = (ax(ae, kAXFocusedWindowAttribute) ?? ax(ae, kAXMainWindowAttribute)) { title = ax(w as! AXUIElement, kAXTitleAttribute) as? String ?? "" }
+        else if let ws = ax(ae, kAXWindowsAttribute) as? [AXUIElement], let w = ws.first { title = ax(w, kAXTitleAttribute) as? String ?? "" }
+        var line = n
+        if !title.isEmpty && title != n { line += " — \(title)" }
+        if a.processIdentifier == front { line += " (frontmost)" }
+        if a.isHidden { line += " (hidden)" }
+        out.append(line)
+    }
+    return out.joined(separator: "\u{1}")
+}
+// System media keys (play/pause, next, volume...) go to whatever is playing, no app targeting needed.
+func mediaKey(_ name: String) -> Bool {
+    let codes: [String: Int32] = ["play": 16, "pause": 16, "playpause": 16, "next": 17, "previous": 18, "prev": 18,
+                                  "volume_up": 0, "volume_down": 1, "mute": 7, "brightness_up": 2, "brightness_down": 3]
+    guard let k = codes[name] else { return false }
+    for down in [true, false] {
+        let flags: NSEvent.ModifierFlags = down ? [] : [.init(rawValue: 0xB00)]
+        let data1 = Int((k << 16) | (down ? 0xA << 8 : 0xB << 8))
+        if let e = NSEvent.otherEvent(with: .systemDefined, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil, subtype: 8, data1: data1, data2: -1) {
+            e.cgEvent?.post(tap: .cghidEventTap)
+        }
+    }
+    return true
+}
 func pid() -> pid_t {
     if targetPid != 0, NSRunningApplication(processIdentifier: targetPid) != nil { return targetPid }
     return NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
@@ -383,6 +415,8 @@ func handle(_ c: [String: Any]) -> String {
         return targetPid == 0 ? "not running" : "pid \(targetPid)"
     case "apps":
         return runningApps()
+    case "apps_detail":
+        return appsDetail()
     case "move":
         fly(to: CGPoint(x: c["x"] as? Double ?? pos.x, y: c["y"] as? Double ?? pos.y))
     case "click":
@@ -445,7 +479,9 @@ func handle(_ c: [String: Any]) -> String {
             }
         }
     case "key":
-        guard let code = keyCode(c["key"] as? String ?? "") else { return "unknown key" }
+        let name = (c["key"] as? String ?? "").lowercased()
+        if mediaKey(name) { return "ok" }
+        guard let code = keyCode(name) else { return "unknown key" }
         var flags: CGEventFlags = []
         for m in c["mods"] as? [String] ?? [] {
             switch m { case "cmd": flags.insert(.maskCommand); case "shift": flags.insert(.maskShift)

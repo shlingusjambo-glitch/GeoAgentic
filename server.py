@@ -22,6 +22,13 @@ computer on the user's behalf through tools and report back when the job is done
 4. Plain conversation ("hi", "what can you do?") gets a plain text answer with no tool calls.
 5. Final report: when the task is complete, reply with 1-3 plain sentences saying what you did and the result.
 
+# Never guess, look
+If the task does not name the app ("unpause my song", "reply to that email", "close this"), do not reason about
+which app it might be: call list_running_apps (one cheap call) or screen_read (reads the frontmost app) and act
+on what is actually there. Keep your reasoning short: decide in a few sentences, then call tools.
+Media keys need no app at all: press_key(key="play") toggles play/pause of whatever is playing; "next",
+"previous", "volume_up", "volume_down", "mute" likewise.
+
 # How to operate the computer
 You drive the Mac like a person: open the app, read its screen, then click, type and press keys with your own
 cursor. That is the default for every task.
@@ -313,6 +320,8 @@ def run_tool(name, a, cfg):
         if r != "(no output)": return f"{r}\nRunning apps: {overlay({'op': 'apps'})}"
         if not target(app): return f"{app} did not start. Running apps: {overlay({'op': 'apps'})}"
         return f"{app} is open; all input now targets it.\n\n" + ensure_accessible(app, screen_read(wait_window=6, full=True))
+    if name == "list_running_apps":
+        return "Running apps (name — window title):\n" + overlay({"op": "apps_detail"}) + "\nInput currently targets: " + (TARGET["app"] or "the frontmost app")
     if name == "menus": return overlay({"op": "menus"})
     if name == "menu":
         p = a.get("path") or []
@@ -407,6 +416,7 @@ TOOLS = [
     T("app_script", "Run AppleScript inside `tell application <app>` (the app stays in the background). The fastest way to create notes/reminders/events, control Music, Mail, Safari, Finder, etc. Returns the script's result or error.", {"app": S, "script": S}, ["app", "script"]),
     T("shell", "Run a zsh command and return its output.", {"command": S}, ["command"]),
     T("open_app", "Open a macOS app by name (Notes, Safari, System Settings, Terminal...) in the background and target all further input at it. Returns the screen once its window exists.", {"name": S}, ["name"]),
+    T("list_running_apps", "Cheap: every running app with its front window title and which one is frontmost. Use it to see what the user is doing before choosing an app (e.g. which player has the song)."),
     T("menus", "List the target app's menu bar: every menu and its items. Use before menu() if unsure of the exact item name."),
     T("menu", "Click a menu bar item of the target app by path, e.g. path=['File','New Note'] or ['Format','Font','Bold']. Works without bringing the app to front.", {"path": {"type": "array", "items": S}}, ["path"]),
     T("screen_read", "Visible elements of the target app's window as `[ref_N] Role \"name\" = \"value\"`, interactive first, dialogs first. Act on them by ref: click(ref='ref_N'), form_input(ref=..., value=...)."),
@@ -414,7 +424,7 @@ TOOLS = [
     T("click", "Click an element: by ref (from a screen dump), or by text=\"label\" which is looked up on the screen at the moment the click runs (waits up to 4s for it to appear, so it works for search results and dialogs you have not seen yet). count=2 for double click, button='right' for a context menu.", {**REF, "count": N, "button": S}),
     T("form_input", "Set the entire value of a text field / search box (by ref, text label, or x,y), replacing existing content. Omit the target to use the focused field.", {**REF, "value": S}, ["value"]),
     T("type_text", "Type text at the current focus (appends at the caret). press_enter=true to hit return afterwards.", {"text": S, "press_enter": B}, ["text"]),
-    T("press_key", "Press a key with optional modifiers, e.g. key='return', or key='n' mods=['cmd']. repeat=N to press it N times.", {"key": S, "mods": {"type": "array", "items": S}, "repeat": N}, ["key"]),
+    T("press_key", "Press a key with optional modifiers, e.g. key='return', or key='n' mods=['cmd']. repeat=N to press it N times. Media keys work without any app: key='play' (toggles play/pause), 'next', 'previous', 'volume_up', 'volume_down', 'mute'.", {"key": S, "mods": {"type": "array", "items": S}, "repeat": N}, ["key"]),
     T("batch", "Run a whole sequence in one call, in order, e.g. [{name:'click',args:{text:'What do you want to play?'}},{name:'form_input',args:{value:'MEGALOVANIA'}},{name:'press_key',args:{key:'return'}},{name:'click',args:{text:'Play MEGALOVANIA'}}]. Steps may target elements by text that only appear after earlier steps. Only the last action returns the screen; a failing step stops the batch.",
       {"actions": {"type": "array", "items": {"type": "object", "properties": {"name": S, "args": {"type": "object"}}, "required": ["name"]}}}, ["actions"]),
     T("browser_open", "Open a URL. browser defaults to 'Google Chrome' (which supports browser_read); pass 'Safari' or 'Firefox' if the user asks, then use screen_read.", {"url": S, "browser": S}, ["url"]),
@@ -433,7 +443,7 @@ TOOLS = [
     T("write_file", "Create/overwrite a text file.", {"path": S, "content": S}, ["path", "content"]),
     T("screenshot", "RARE: take a screenshot and get a vision-model description. Only when screen_read/browser_read are insufficient."),
 ]
-READ_TOOLS = {"screen_read", "browser_read", "find", "menus", "get_page_text", "read_file"}
+READ_TOOLS = {"screen_read", "browser_read", "find", "menus", "get_page_text", "read_file", "list_running_apps"}
 ONCE_TOOLS = {"app_script", "shell", "write_file", "install_app", "open_app", "browser_open"}  # same call twice = duplicate side effect
 
 def ollama(path, body):
