@@ -1096,6 +1096,12 @@ farms. Beyond that, decide together what you want: a town, roads, a trading post
 tradeable with give), laws on the board, exploring, mining for diamonds, fighting the dragon. Propose, argue,
 agree, and then build it."""
 
+MC_ROLES = ["wood and tools: gather logs, craft the crafting table, sticks and pickaxes, then stone tools for everyone",
+            "shelter and building: gather dirt or cobblestone and build the house before night, then expand it",
+            "food and scouting: find and kill animals (hunt), collect apples/wheat, report what is around",
+            "mining: with a pickaxe from the tool-maker, mine stone, coal and iron and bring it back",
+            "farming and wood supply: collect logs and saplings, till and plant, keep the team stocked",
+            "defense: craft a sword, stay near the builder and fight mobs"]
 def mc_role(name, bots): return MC_ROLES[bots.index(name) % len(MC_ROLES)] if name in bots else MC_ROLES[0]
 def mc_prompt(name, bots):
     others = [b for b in bots if b != name]
@@ -1131,11 +1137,12 @@ def minecraft_turn(messages, cfg, emit):
         hist = MC_SESSIONS.setdefault(name, [])
         hist.append({"role": "user", "content": task})
         sub = dict(cfg, tools="minecraft", _bot=name, _bots=names)
-        if len(names) > 1: minecraft(f"say {name}: on it. Starting job: {mc_role(name, names).split(':')[0]}.", bot=name)  # the harness announces starting jobs
         # A Minecraft task is a standing objective: when the bot finishes a step it gets the next round, until the
         # user presses Stop (the connection closes) or the round limit is hit.
         for rnd in range(MC_ROUNDS):
-            try: agent(hist, sub, bot_emit(name), system=mc_prompt(name, names), tools=MC_TOOLS)
+            try:
+                if rnd == 0 and len(names) > 1: minecraft(f"say {name}: on it. Starting job: {mc_role(name, names).split(':')[0]}.", bot=name)
+                agent(hist, sub, bot_emit(name), system=mc_prompt(name, names), tools=MC_TOOLS)
             except (BrokenPipeError, ConnectionResetError): return
             except Exception as ex:
                 import traceback; traceback.print_exc()
