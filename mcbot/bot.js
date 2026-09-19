@@ -94,7 +94,7 @@ async function connect(port, username) {
     const nb = mineflayer.createBot({ host: '127.0.0.1', port, username, auth: 'offline' });
     entry.bot = nb;
     nb.loadPlugin(pathfinder);
-    nb.once('spawn', () => { nb.pathfinder.setMovements(new Movements(nb)); resolve(); });
+    nb.once('spawn', () => { const mv = new Movements(nb); mv.canDig = true; mv.allow1by1towers = true; nb.pathfinder.setMovements(mv); nb.pathfinder.thinkTimeout = 15000; resolve(); });
     nb.on('chat', (u, m) => { if (u === username) return; entry.chat.push(`${u}: ${m}`); if (entry.chat.length > 30) entry.chat.shift(); });
     nb.on('whisper', (u, m) => { entry.chat.push(`${u} (private): ${m}`); if (entry.chat.length > 30) entry.chat.shift(); });
     nb.on('kicked', (r) => { entry.chat.push(`kicked: ${r}`); delete BOTS[username]; });

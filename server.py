@@ -1137,7 +1137,9 @@ def minecraft_turn(messages, cfg, emit):
         for rnd in range(MC_ROUNDS):
             try: agent(hist, sub, bot_emit(name), system=mc_prompt(name, names), tools=MC_TOOLS)
             except (BrokenPipeError, ConnectionResetError): return
-            except Exception as ex: bot_emit(name)({"type": "text", "content": f"{name} stopped: {ex}"}); return
+            except Exception as ex:
+                import traceback; traceback.print_exc()
+                bot_emit(name)({"type": "text", "content": f"{name} stopped: {type(ex).__name__}: {ex}"}); return
             last = next((m.get("content") for m in reversed(hist) if m.get("role") == "assistant" and m.get("content")), "")
             if last: minecraft(f"say {name}: {last[:100]}", bot=name)  # the report goes to the team and the user in-game
             if len(hist) > 40: del hist[1:-24]  # keep the context small over a long session
@@ -1218,6 +1220,7 @@ def agent(messages, cfg, emit, system=None, tools=None):
                       "reply). Try a lower reasoning setting or a different model."}); return
             m.pop("done_reason", None)
         m.pop("done_reason", None)
+        if m.get("content"): m["content"] = re.sub(r"</?(?:text|tool|tool_call|response|answer)>", "", m["content"]).strip()
         if m.get("thinking"): emit({"type": "thinking", "content": m["thinking"]})
         msgs.append(m)
         if mc_bot: messages.append({k: v for k, v in m.items() if k != "thinking"})  # keep the bot's own history
@@ -1362,8 +1365,13 @@ class H(SimpleHTTPRequestHandler):
                     names, status = mc_connect_all(body.get("bots") or 1)
                     emit({"type": "text", "content": status})
                 emit({"type": "done"}); return
-            if cfg.get("minecraft"): minecraft_turn(body["messages"], cfg, emit)
-            else: agent_turn(body["messages"], cfg, emit)
+            try:
+                if cfg.get("minecraft"): minecraft_turn(body["messages"], cfg, emit)
+                else: agent_turn(body["messages"], cfg, emit)
+            except (BrokenPipeError, ConnectionResetError): raise
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                emit({"type": "text", "content": f"server error: {type(e).__name__}: {e} (details in the terminal)"})
             emit({"type": "done"})
         except (BrokenPipeError, ConnectionResetError):
             pass

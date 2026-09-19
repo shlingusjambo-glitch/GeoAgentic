@@ -15,6 +15,7 @@ var activity = ""                          // what the agent is doing right now
 var lastResult = ""
 var task: URLSessionDataTask? = nil
 var lineBuffer = ""
+var sawDone = false
 
 // ---------- status item ----------
 let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -126,7 +127,10 @@ final class Stream: NSObject, URLSessionDataDelegate {
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         DispatchQueue.main.async {
-            if phase == .working { setPhase(error == nil ? .done : .failed) }
+            if phase == .working {  // "Task complete" only when the server said done; a stream that just ends is a failure
+                if error == nil && !sawDone { log("the server ended the task without finishing (see the terminal for the error)") }
+                setPhase(error == nil && sawDone ? .done : .failed)
+            }
             if let e = error, (e as NSError).code != NSURLErrorCancelled { log("connection error: \(e.localizedDescription) — is ./run.sh running?") }
         }
     }
@@ -153,7 +157,7 @@ func handle(_ ev: [String: Any]) {
         if !t.isEmpty { log(who + "💭 " + t.suffix(300)) }
         activity = who + "thinking…"; refresh()
     case "done":
-        setPhase(.done); activity = ""
+        sawDone = true; setPhase(.done); activity = ""
     default: break
     }
 }
@@ -161,7 +165,7 @@ func handle(_ ev: [String: Any]) {
 func submit() {
     let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty, phase != .working, let url = URL(string: SERVER + "/") else { return }
-    field.stringValue = ""; logLines = []; log("› " + text)
+    field.stringValue = ""; logLines = []; sawDone = false; log("› " + text)
     history.append(["role": "user", "content": text])
     activity = "starting"; setPhase(.working)
     let model = modelPopup.titleOfSelectedItem ?? ""
