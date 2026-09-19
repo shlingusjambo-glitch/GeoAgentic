@@ -80,6 +80,7 @@ func pidFor(_ name: String) -> pid_t {
     // exact name / bundle name first, then a loose match ("settings" -> "System Settings", "chrome" -> "Google Chrome")
     if let a = apps.first(where: { ($0.localizedName ?? "").lowercased() == n || ($0.bundleURL?.lastPathComponent.lowercased() ?? "") == n + ".app" }) { return a.processIdentifier }
     if let a = apps.first(where: { ($0.localizedName ?? "").lowercased().contains(n) || ($0.bundleIdentifier ?? "").lowercased().hasSuffix("." + n) }) { return a.processIdentifier }
+    if let a = NSWorkspace.shared.runningApplications.first(where: { ($0.bundleIdentifier ?? "").lowercased().hasSuffix("." + n) || ($0.localizedName ?? "").lowercased() == n }) { return a.processIdentifier }
     return 0
 }
 func runningApps() -> String {
@@ -122,8 +123,19 @@ func pid() -> pid_t {
     if targetPid != 0, NSRunningApplication(processIdentifier: targetPid) != nil { return targetPid }
     return 0
 }
-func send(_ e: CGEvent?) { let p = pid(); if p != 0 { e?.postToPid(p) } }
-func appEl() -> AXUIElement { AXUIElementCreateApplication(pid()) }
+// Sandboxed open/save panels (and some alerts) are hosted by a separate system process; when one is up in front of
+// the target app, reads and input go to it instead.
+func panelPid() -> pid_t {
+    guard pid() != 0 else { return 0 }
+    for a in NSWorkspace.shared.runningApplications where a.bundleIdentifier == "com.apple.appkit.xpc.openAndSavePanelService" {
+        let ae = AXUIElementCreateApplication(a.processIdentifier)
+        if let ws = ax(ae, kAXWindowsAttribute) as? [AXUIElement], !ws.isEmpty { return a.processIdentifier }
+    }
+    return 0
+}
+func inputPid() -> pid_t { let p = panelPid(); return p != 0 ? p : pid() }
+func send(_ e: CGEvent?) { let p = inputPid(); if p != 0 { e?.postToPid(p) } }
+func appEl() -> AXUIElement { AXUIElementCreateApplication(inputPid()) }
 func focusedEl() -> AXUIElement? {
     if pid() == 0 { return nil }
     var v: AnyObject?
@@ -314,13 +326,22 @@ func walk(_ e: AXUIElement, _ depth: Int, _ inRow: Bool, _ act: inout [String], 
 func tree() -> String {
     let p = pid()
     guard p != 0, let app = NSRunningApplication(processIdentifier: p) else { return "no target app: call open_app(name) first (list_running_apps shows what is running)" }
-    let ae = AXUIElementCreateApplication(p)
+    let pp = panelPid()
+    let ae = AXUIElementCreateApplication(pp != 0 ? pp : p)
     var out = ["app: \(app.localizedName ?? "?")"]
-    var w: AXUIElement? = nil
-    if let f = ax(ae, kAXFocusedWindowAttribute) { w = (f as! AXUIElement) }
-    else if let m = ax(ae, kAXMainWindowAttribute) { w = (m as! AXUIElement) }
-    else { w = (ax(ae, kAXWindowsAttribute) as? [AXUIElement])?.first }
-    guard let win = w else { return out.joined(separator: "\n") + "\n(no window found — is the app open? Accessibility permission granted?)" }
+    if pp != 0 { out.append("DIALOG: an open/save panel is in front of the app. Fill it in or press escape to dismiss it.") }
+    // Prefer the focused window, but only if it is actually on this screen: a window on another Space, minimized,
+    // or an invisible helper window would otherwise yield an empty dump.
+    let screen = CGRect(x: 0, y: 0, width: NSScreen.screens[0].frame.width, height: screenH())
+    var candidates: [AXUIElement] = []
+    if let f = ax(ae, kAXFocusedWindowAttribute) { candidates.append(f as! AXUIElement) }
+    if let m = ax(ae, kAXMainWindowAttribute) { candidates.append(m as! AXUIElement) }
+    candidates += (ax(ae, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+    let onScreen = candidates.first { w in
+        let f = frame(w); let mini = ax(w, kAXMinimizedAttribute) as? Bool ?? false
+        return f.width > 50 && f.height > 50 && f.intersects(screen) && !mini
+    }
+    guard let win = onScreen ?? candidates.first else { return out.joined(separator: "\n") + "\n(no window found — is the app open? Accessibility permission granted?)" }
     // Chromium/Electron apps (Spotify, Discord, Slack, VS Code, Chrome...) expose no accessibility tree until a
     // client asks for it. Setting these attributes switches it on; the tree appears a moment later.
     if !enabledAX.contains(p) {
@@ -330,7 +351,6 @@ func tree() -> String {
         frame(0.6)
     }
     out.append("window: \(ax(win, kAXTitleAttribute) as? String ?? "")")
-    let screen = CGRect(x: 0, y: 0, width: NSScreen.screens[0].frame.width, height: screenH())
     visible = frame(win).intersection(screen)
     var act: [String] = [], text: [String] = []
     actEls = []; textEls = []; lastEls = []; seen = []
@@ -455,6 +475,28 @@ func handle(_ c: [String: Any]) -> String {
             if r.contains(p) { out.append("pid=\(w[kCGWindowOwnerPID as String] ?? 0) \(w[kCGWindowOwnerName as String] ?? "?") layer=\(w[kCGWindowLayer as String] ?? 0) alpha=\(w[kCGWindowAlpha as String] ?? 1) \(Int(r.width))x\(Int(r.height))") }
         }
         return out.joined(separator: "\u{1}")
+    case "windows":  // debug: the target app's AX windows with frames
+        var out: [String] = []
+        for w in (ax(appEl(), kAXWindowsAttribute) as? [AXUIElement]) ?? [] {
+            let f = frame(w); let kids = (ax(w, kAXChildrenAttribute) as? [AXUIElement])?.count ?? 0
+            out.append("\(ax(w, kAXTitleAttribute) as? String ?? "") \(ax(w, kAXSubroleAttribute) as? String ?? "") frame=\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height)) kids=\(kids) mini=\(ax(w, kAXMinimizedAttribute) as? Bool ?? false)")
+        }
+        return out.joined(separator: "\u{1}")
+    case "windump":  // debug: first levels of the first window
+        guard let w = (ax(appEl(), kAXWindowsAttribute) as? [AXUIElement])?.first else { return "no window" }
+        var out: [String] = []
+        func d(_ e: AXUIElement, _ depth: Int) {
+            if depth > 3 || out.count > 40 { return }
+            let f = frame(e)
+            out.append(String(repeating: "  ", count: depth) + "\(ax(e, kAXRoleAttribute) ?? "?")/\(ax(e, kAXSubroleAttribute) ?? "") '\(ax(e, kAXTitleAttribute) ?? "")' \(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))")
+            for k in (ax(e, kAXChildrenAttribute) as? [AXUIElement]) ?? [] { d(k, depth + 1) }
+        }
+        d(w, 0)
+        return out.joined(separator: "\u{1}")
+    case "axreset":  // debug: clear the enhanced-UI flag on the target app
+        AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid()), "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
+        AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid()), "AXManualAccessibility" as CFString, kCFBooleanFalse)
+        enabledAX.remove(pid())
     case "state":
         return "pos=\(Int(pos.x)),\(Int(pos.y)) showing=\(showing) overTarget=\(overTarget()) alpha=\(win.alphaValue)"
     case "axscroll":  // scroll the largest scroll area in the window by moving its vertical scrollbar
