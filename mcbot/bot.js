@@ -7,7 +7,14 @@ const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
 
+// Several bots can live in one world; `bot` is the one the current request addresses (set per request).
+const BOTS = {};  // name -> { bot, chat: [], busy: null }
 let bot = null, lanPort = null, busy = null, lastChat = [], lastPlaceError = '';
+function select(name) {
+  const entry = name ? BOTS[name] : Object.values(BOTS)[0];
+  bot = entry ? entry.bot : null; lastChat = entry ? entry.chat : [];
+  return entry;
+}
 
 // ---- LAN discovery: Minecraft announces "Open to LAN" worlds on 224.0.2.60:4445 ----
 const udp = dgram.createSocket({ type: 'udp4', reuseAddr: true });
@@ -45,7 +52,7 @@ function state() {
     connected: true, name: bot.username, position: V(p), facing, health: bot.health, food: bot.food,
     time: bot.time.isDay ? 'day' : 'night', standing_on: under && under.name, looking_at: ahead ? `${ahead.name} at ${V(ahead.position)}` : 'nothing within reach',
     held: bot.heldItem ? bot.heldItem.name : 'nothing', inventory: inv, nearby_blocks: near, nearby_entities: ents, players,
-    recent_chat: lastChat.slice(-5), busy: busy || null,
+    recent_chat: lastChat.slice(-8), busy: (BOTS[bot.username] || {}).busy || null, bots: Object.keys(BOTS),
     warning: bot.food <= 6 ? 'hungry: find food (kill animals, harvest crops/apples) and eat' : (bot.health <= 6 ? 'low health: retreat, eat, avoid mobs' : undefined),
   };
 }
@@ -53,6 +60,7 @@ function state() {
 // Self-defense reflex: hit hostile mobs that come within reach, back away from creepers.
 const HOSTILE = new Set(['zombie', 'skeleton', 'spider', 'cave_spider', 'creeper', 'enderman', 'witch', 'drowned', 'husk', 'stray', 'phantom', 'slime', 'zombie_villager', 'pillager', 'vindicator']);
 let lastSwing = 0;
+function defendAll() { for (const e of Object.values(BOTS)) { const saved = bot; bot = e.bot; try { defend(); } catch (x) {} bot = saved; } }
 function defend() {
   if (!bot || !bot.entity) return;
   const p = bot.entity.position;
@@ -67,23 +75,27 @@ function defend() {
   if (sword && (!bot.heldItem || bot.heldItem.name !== sword.name)) bot.equip(sword, 'hand').then(swing).catch(swing); else swing();
   lastChat.push(`(fighting a ${mob.name})`);
 }
-setInterval(() => { try { defend(); } catch (e) {} }, 400);
+setInterval(defendAll, 400);
 
 async function connect(port, username) {
-  if (bot) { try { bot.quit(); } catch (e) {} bot = null; }
+  username = username || 'GeoAgent';
+  if (BOTS[username]) { select(username); if (bot && bot.entity) return `${username} is already in the world at ${V(bot.entity.position)}`; try { BOTS[username].bot.quit(); } catch (e) {} delete BOTS[username]; }
   port = port || lanPort;
   if (!port) throw new Error('no LAN world found: in Minecraft press Escape > Open to LAN > Start LAN World (or give the port)');
+  const entry = { bot: null, chat: [], busy: null };
   await new Promise((resolve, reject) => {
-    bot = mineflayer.createBot({ host: '127.0.0.1', port, username: username || 'GeoAgent', auth: 'offline' });
-    bot.loadPlugin(pathfinder);
-    bot.once('spawn', () => { bot.pathfinder.setMovements(new Movements(bot)); resolve(); });
-    bot.on('chat', (u, m) => { lastChat.push(`${u}: ${m}`); if (lastChat.length > 20) lastChat.shift(); });
-    bot.on('kicked', (r) => { lastChat.push(`kicked: ${r}`); bot = null; });
-    bot.on('error', (e) => reject(new Error('join failed: ' + e.message + ' (LAN worlds must not require online authentication)')));
-    bot.on('end', () => { bot = null; });
+    const nb = mineflayer.createBot({ host: '127.0.0.1', port, username, auth: 'offline' });
+    entry.bot = nb;
+    nb.loadPlugin(pathfinder);
+    nb.once('spawn', () => { nb.pathfinder.setMovements(new Movements(nb)); resolve(); });
+    nb.on('chat', (u, m) => { if (u === username) return; entry.chat.push(`${u}: ${m}`); if (entry.chat.length > 30) entry.chat.shift(); });
+    nb.on('kicked', (r) => { entry.chat.push(`kicked: ${r}`); delete BOTS[username]; });
+    nb.on('error', (e) => reject(new Error('join failed: ' + e.message + ' (LAN worlds must not require online authentication)')));
+    nb.on('end', () => { delete BOTS[username]; });
     setTimeout(() => reject(new Error('join timed out')), 20000);
   });
-  return `joined the world as ${bot.username} at ${V(bot.entity.position)}`;
+  BOTS[username] = entry; select(username);
+  return `joined the world as ${username} at ${V(bot.entity.position)}`;
 }
 
 async function goto(x, y, z, range = 1) {
@@ -268,8 +280,10 @@ async function autoEat() {
 }
 async function run(q) {
   const a = q.action;
+  if (a === 'bots') return { bots: Object.keys(BOTS), lanPort };
+  if (a === 'connect') return await connect(q.port, q.username || q.bot);
+  select(q.bot);
   if (a === 'state') return state();
-  if (a === 'connect') return await connect(q.port, q.username);
   if (!bot) throw new Error('not in a world yet: connect first (Minecraft: Escape > Open to LAN > Start LAN World)');
   if (['goto','come','follow','collect','build_house','craft'].includes(a)) {
     await autoEat();
@@ -291,7 +305,7 @@ async function run(q) {
     case 'chat': bot.chat(q.text); return `said: ${q.text}`;
     case 'look': await bot.look(((+q.yaw || 0) * Math.PI / 180), ((+q.pitch || 0) * Math.PI / 180), true); return 'looking';
     case 'stop': bot.pathfinder.setGoal(null); bot.stopDigging(); return 'stopped';
-    case 'disconnect': bot.quit(); bot = null; return 'left the world';
+    case 'disconnect': { const n = bot.username; bot.quit(); delete BOTS[n]; bot = null; return `${n} left the world`; }
     default: throw new Error(`unknown action ${a}`);
   }
 }
@@ -302,11 +316,14 @@ http.createServer((req, res) => {
   req.on('end', async () => {
     let q = {}; try { q = JSON.parse(body || '{}'); } catch (e) {}
     const send = (o) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
-    if (busy && q.action !== 'state' && q.action !== 'stop') return send({ ok: false, error: `still busy with: ${busy}` });
-    busy = q.action === 'state' ? busy : q.action;
+    const entry = q.bot ? BOTS[q.bot] : Object.values(BOTS)[0];
+    const passive = ['state', 'stop', 'bots', 'connect'].includes(q.action);
+    if (entry && entry.busy && !passive) return send({ ok: false, error: `still busy with: ${entry.busy}` });
+    if (entry && !passive) entry.busy = q.action;
     try { const r = await Promise.race([run(q), new Promise((_, rej) => setTimeout(() => rej(new Error('action timed out (300s)')), 300000))]);
+          select(q.bot); busy = entry ? entry.busy : null;
           send({ ok: true, result: r, state: q.action === 'state' ? undefined : state() }); }
-    catch (e) { send({ ok: false, error: e.message, state: state() }); }
-    finally { if (q.action !== 'state') busy = null; }
+    catch (e) { select(q.bot); send({ ok: false, error: e.message, state: state() }); }
+    finally { if (entry && !passive) entry.busy = null; }
   });
 }).listen(8125, '127.0.0.1', () => console.log('mcbot on 8125'));

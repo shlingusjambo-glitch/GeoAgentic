@@ -36,30 +36,39 @@ func setPhase(_ p: Phase) {
 let popover = NSPopover()
 popover.behavior = .transient
 popover.animates = true
-let root = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 300))
+let root = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 340))
 
-let field = NSTextField(frame: NSRect(x: 16, y: 252, width: 380, height: 32))
+let field = NSTextField(frame: NSRect(x: 16, y: 292, width: 380, height: 32))
 field.placeholderString = "What can I help you with today?"
 field.font = NSFont.systemFont(ofSize: 17)
 field.isBezeled = false; field.drawsBackground = false; field.focusRingType = .none
 field.cell?.usesSingleLineMode = true; field.cell?.wraps = false; field.cell?.isScrollable = true
 
-let sendBtn = NSButton(frame: NSRect(x: 462, y: 250, width: 42, height: 36))
+let sendBtn = NSButton(frame: NSRect(x: 462, y: 290, width: 42, height: 36))
 sendBtn.bezelStyle = .rounded; sendBtn.title = ""
 sendBtn.image = NSImage(systemSymbolName: "arrow.up", accessibilityDescription: "Send")
 sendBtn.keyEquivalent = "\r"
 
-let stopBtn = NSButton(frame: NSRect(x: 412, y: 250, width: 42, height: 36))
+let stopBtn = NSButton(frame: NSRect(x: 412, y: 290, width: 42, height: 36))
 stopBtn.bezelStyle = .rounded; stopBtn.title = ""
 stopBtn.image = NSImage(systemSymbolName: "stop.fill", accessibilityDescription: "Stop"); stopBtn.isHidden = true
 
-let modelPopup = NSPopUpButton(frame: NSRect(x: 16, y: 212, width: 220, height: 26), pullsDown: false)
+let modelPopup = NSPopUpButton(frame: NSRect(x: 16, y: 252, width: 220, height: 26), pullsDown: false)
 modelPopup.font = NSFont.systemFont(ofSize: 12)
-let reasoningPopup = NSPopUpButton(frame: NSRect(x: 244, y: 212, width: 150, height: 26), pullsDown: false)
+let reasoningPopup = NSPopUpButton(frame: NSRect(x: 244, y: 252, width: 150, height: 26), pullsDown: false)
 reasoningPopup.addItems(withTitles: ["none", "low", "medium", "high", "extra", "max", "ultra"].map { "reasoning: " + $0 })
 reasoningPopup.font = NSFont.systemFont(ofSize: 12)
-let newChatBtn = NSButton(frame: NSRect(x: 402, y: 212, width: 102, height: 26))
+let newChatBtn = NSButton(frame: NSRect(x: 402, y: 252, width: 102, height: 26))
 newChatBtn.bezelStyle = .rounded; newChatBtn.title = "New chat"; newChatBtn.font = NSFont.systemFont(ofSize: 12)
+
+// ---- settings row: Minecraft mode ----
+let mcCheck = NSButton(checkboxWithTitle: "Minecraft mode", target: nil, action: nil)
+mcCheck.frame = NSRect(x: 16, y: 220, width: 140, height: 22); mcCheck.font = NSFont.systemFont(ofSize: 12)
+let botsPopup = NSPopUpButton(frame: NSRect(x: 160, y: 218, width: 90, height: 26), pullsDown: false)
+botsPopup.addItems(withTitles: (1...6).map { "\($0) bot" + ($0 > 1 ? "s" : "") }); botsPopup.font = NSFont.systemFont(ofSize: 12)
+let mcStatus = NSTextField(labelWithString: "")
+mcStatus.frame = NSRect(x: 258, y: 220, width: 246, height: 20); mcStatus.font = NSFont.systemFont(ofSize: 11); mcStatus.textColor = .secondaryLabelColor
+mcStatus.lineBreakMode = .byTruncatingTail
 
 let statusLabel = NSTextField(labelWithString: "Idle")
 statusLabel.frame = NSRect(x: 16, y: 180, width: 488, height: 20)
@@ -71,7 +80,7 @@ logView.isEditable = false; logView.font = NSFont.monospacedSystemFont(ofSize: 1
 logView.textContainerInset = NSSize(width: 6, height: 6)
 logScroll.documentView = logView; logScroll.hasVerticalScroller = true; logScroll.borderType = .bezelBorder
 
-for v in [field, sendBtn, stopBtn, modelPopup, reasoningPopup, newChatBtn, statusLabel, logScroll] as [NSView] { root.addSubview(v) }
+for v in [field, sendBtn, stopBtn, modelPopup, reasoningPopup, newChatBtn, mcCheck, botsPopup, mcStatus, statusLabel, logScroll] as [NSView] { root.addSubview(v) }
 let vc = NSViewController(); vc.view = root; popover.contentViewController = vc
 
 var logLines: [String] = []
@@ -126,20 +135,23 @@ let streamDelegate = Stream()
 let session = URLSession(configuration: .default, delegate: streamDelegate, delegateQueue: nil)
 
 func handle(_ ev: [String: Any]) {
+    let who = (ev["bot"] as? String).map { "[\($0)] " } ?? ""
     switch ev["type"] as? String {
     case "tool":
         let name = ev["name"] as? String ?? ""
         let args = (ev["args"] as? [String: Any])?.values.compactMap { $0 as? String }.joined(separator: " ") ?? ""
-        activity = (name + " " + args).trimmingCharacters(in: .whitespaces)
-        log("▸ " + activity); setPhase(.working)
+        activity = who + (name + " " + args).trimmingCharacters(in: .whitespaces)
+        log(who + "▸ " + (name + " " + args).trimmingCharacters(in: .whitespaces)); setPhase(.working)
     case "result":
         let r = (ev["result"] as? String ?? "").split(separator: "\n").first.map(String.init) ?? ""
-        log("   " + r.prefix(120))
+        log(who + "   " + r.prefix(140))
     case "text":
         let t = ev["content"] as? String ?? ""
-        lastResult = t; history.append(["role": "assistant", "content": t]); log("● " + t)
+        lastResult = t; if who.isEmpty { history.append(["role": "assistant", "content": t]) }; log(who + "● " + t)
     case "thinking":
-        activity = "thinking…"; refresh()
+        let t = (ev["content"] as? String ?? "").replacingOccurrences(of: "\n", with: " ")
+        if !t.isEmpty { log(who + "💭 " + t.suffix(300)) }
+        activity = who + "thinking…"; refresh()
     case "done":
         setPhase(.done); activity = ""
     default: break
@@ -155,7 +167,9 @@ func submit() {
     let model = modelPopup.titleOfSelectedItem ?? ""
     UserDefaults.standard.set(model, forKey: "model")
     let reasoning = (reasoningPopup.titleOfSelectedItem ?? "reasoning: none").replacingOccurrences(of: "reasoning: ", with: "")
-    let body: [String: Any] = ["messages": history, "cfg": ["model": model, "reasoning": reasoning, "tools": "compact", "vision_model": "moondream"]]
+    var cfg: [String: Any] = ["model": model, "reasoning": reasoning, "tools": "compact", "vision_model": "moondream"]
+    if mcCheck.state == .on { cfg["minecraft"] = true; cfg["bots"] = botsPopup.indexOfSelectedItem + 1 }
+    let body: [String: Any] = ["messages": history, "cfg": cfg]
     var req = URLRequest(url: url); req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     req.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -163,10 +177,45 @@ func submit() {
     task = session.dataTask(with: req); task?.resume()
 }
 
+func mcControl(_ payload: [String: Any]) {
+    guard let url = URL(string: SERVER + "/api/minecraft") else { return }
+    var req = URLRequest(url: url); req.httpMethod = "POST"
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+    URLSession.shared.dataTask(with: req) { data, _, _ in
+        guard let d = data else { return }
+        for line in String(decoding: d, as: UTF8.self).split(separator: "\n") {
+            if let j = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any], j["type"] as? String == "text", let t = j["content"] as? String {
+                DispatchQueue.main.async { log("⛏ " + t) }
+            }
+        }
+    }.resume()
+}
+func pollMinecraft() {
+    guard mcCheck.state == .on, let url = URL(string: SERVER + "/api/minecraft") else { return }
+    URLSession.shared.dataTask(with: url) { data, _, _ in
+        guard let d = data, let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return }
+        let running = j["running"] as? Bool ?? false, lan = j["lan"] as? Bool ?? false, bots = j["bots"] as? [String] ?? []
+        let s = !running ? "Minecraft not running" : !lan ? "open the world to LAN (Esc > Open to LAN)" : bots.isEmpty ? "world open, no bots yet" : "in world: " + bots.joined(separator: ", ")
+        DispatchQueue.main.async { mcStatus.stringValue = s }
+    }.resume()
+}
+Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in pollMinecraft() }
+
 final class Actions: NSObject {
     @objc func send(_ s: Any?) { submit() }
     @objc func stop(_ s: Any?) { task?.cancel(); setPhase(.failed); log("stopped") }
-    @objc func newChat(_ s: Any?) { history = []; logLines = []; logView.string = ""; setPhase(.idle) }
+    @objc func newChat(_ s: Any?) { history = []; logLines = []; logView.string = ""; setPhase(.idle); if mcCheck.state == .on { mcControl(["reset": true]) } }
+    @objc func mcToggle(_ s: Any?) {
+        UserDefaults.standard.set(mcCheck.state == .on, forKey: "minecraft")
+        if mcCheck.state == .on { mcStatus.stringValue = "joining…"; mcControl(["enable": true, "bots": botsPopup.indexOfSelectedItem + 1]); field.placeholderString = "Tell the bots what to do in Minecraft" }
+        else { mcControl(["disconnect": true]); mcStatus.stringValue = ""; field.placeholderString = "What can I help you with today?" }
+        pollMinecraft()
+    }
+    @objc func botsChanged(_ s: Any?) {
+        UserDefaults.standard.set(botsPopup.indexOfSelectedItem + 1, forKey: "bots")
+        if mcCheck.state == .on { mcControl(["enable": true, "bots": botsPopup.indexOfSelectedItem + 1]) }
+    }
     @objc func toggle(_ s: Any?) {
         if popover.isShown { popover.performClose(nil); return }
         guard let b = statusItem.button else { return }
@@ -181,6 +230,10 @@ sendBtn.target = actions; sendBtn.action = #selector(Actions.send(_:))
 stopBtn.target = actions; stopBtn.action = #selector(Actions.stop(_:))
 newChatBtn.target = actions; newChatBtn.action = #selector(Actions.newChat(_:))
 statusItem.button?.target = actions; statusItem.button?.action = #selector(Actions.toggle(_:))
+mcCheck.target = actions; mcCheck.action = #selector(Actions.mcToggle(_:))
+botsPopup.target = actions; botsPopup.action = #selector(Actions.botsChanged(_:))
+botsPopup.selectItem(at: max(0, UserDefaults.standard.integer(forKey: "bots") - 1))
+if UserDefaults.standard.bool(forKey: "minecraft") { mcCheck.state = .on; field.placeholderString = "Tell the bots what to do in Minecraft" }
 
 // Also quit on our own if the server disappears (e.g. the terminal was force-closed), so a visible icon always
 // means a live, current server.

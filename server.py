@@ -495,9 +495,9 @@ def mcbot(payload):
         req = urllib.request.Request("http://127.0.0.1:8125/", json.dumps(p).encode(), {"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as r: return json.load(r)
     try:
-        if payload.get("action") not in ("state", "stop"):  # a previous long action may still be running: wait for it
+        if payload.get("action") not in ("state", "stop", "bots", "connect"):  # a previous long action may still be running: wait for it
             for _ in range(150):
-                st = post({"action": "state"}, 10).get("result") or {}
+                st = post({"action": "state", "bot": payload.get("bot")}, 10).get("result") or {}
                 if not st.get("busy"): break
                 time.sleep(2)
         return post(payload, 330)
@@ -516,9 +516,9 @@ def fmt_state(st):
             + ("\nIt is night: hostile mobs are out. If health keeps dropping, minecraft(\"shelter\") and minecraft(\"wait 60\") until day." if st.get("time") == "night" else "")
             + (f"\nchat: {' | '.join(st['recent_chat'])}" if st.get("recent_chat") else ""))
 
-def minecraft(cmd):
+def minecraft(cmd, bot=None):
     """Mini-language: connect [port] | state | come | goto x y z | collect <block> [n] | dig <block> | place <block> [x y z] |
-    craft <item> [n] | equip <item> | build house [size] [block] | say <text> | stop"""
+    craft <item> [n] | equip <item> | build house [size] [block] | say <text> | stop. `bot` addresses one of several bots."""
     w = cmd.strip().split(); a = (w[0].lower() if w else "state"); rest = w[1:]
     def num(i, d=None): 
         try: return float(rest[i])
@@ -545,7 +545,9 @@ def minecraft(cmd):
     elif a == "shelter": q = {"action": "shelter"}
     elif a == "wait": q = {"action": "wait", "seconds": num(0, 30)}
     elif a == "stop": q = {"action": "stop"}
-    else: return 'unknown minecraft action. Use: connect | state | come | goto x y z | collect <block> [n] | dig <block> | place <block> | craft <item> [n] | equip <item> | build house [size] [block] | say <text> | stop'
+    else: return 'unknown minecraft action. Use: ' + MC_HELP
+    if bot: q["bot"] = bot
+    if q["action"] == "connect" and bot and not q.get("username"): q["username"] = bot
     r = mcbot(q)
     if q["action"] == "state": return fmt_state(r.get("result") if r.get("ok") else r.get("state")) or r.get("error", "")
     out = (str(r.get("result")) if r.get("ok") else "error: " + str(r.get("error")))
@@ -661,7 +663,7 @@ def run_tool(name, a, cfg):
             overlay({"op": "click", "count": 1, "button": btn, "mouse": True}); time.sleep(0.5)
             return after_action(before, f"clicked {btn} mouse button")
         return 'unknown mouse action; use "look left|right|up|down <degrees>", "hold left|right <seconds>", "click left|right"'
-    if name == "minecraft": return minecraft(str(a.get("action", "state")))
+    if name == "minecraft": return minecraft(str(a.get("action", "state")), a.get("_bot"))
     if name == "list_running_apps":
         apps = overlay({"op": "apps_detail"})
         apps = re.sub(r"^((?:" + "|".join(map(re.escape, BROWSERS)) + r") — " + OWN_UI + r"(?: |$).*)$", r"\1  <- your own chat UI, never operate it", apps, flags=re.M)
@@ -998,12 +1000,72 @@ marked [tool result]. When the task is complete, reply in plain text with no JSO
 
 NO_TOOLS = set()  # models Ollama refused to run with a tools array
 
-def agent(messages, cfg, emit):
-    TARGET["app"] = ""; overlay({"op": "target", "app": ""})  # every task starts with no app: nothing leaks between turns
+MC_BOT_NAMES = ["Geo", "Ada", "Kai", "Mira", "Rex", "Zed"]
+MC_SESSIONS = {}  # bot name -> its conversation (persists across prompts until reset)
+MC_TOOLS = [
+    T("minecraft", "Act in the world. action: " + MC_HELP + ". Every result includes your position, inventory, surroundings and recent chat.", {"action": S}, ["action"]),
+    T("done", "Finish this task with a one-sentence report.", {"result": S}, ["result"]),
+]
+MC_SYSTEM = """You are {name}, a player in the user's Minecraft survival world, controlled through the minecraft tool. You act
+from TEXT: every result shows your position, health, food, inventory, nearby blocks, entities and recent chat.
+{team}
+Rules
+- Act with tool calls until the task is done, then call done(result). Keep reasoning short.
+- Materials: use what the state lists nearby. Dirt is always available. Stone and ores need a pickaxe. Read the
+  suggestion in every error and follow it (e.g. "collect dirt 33").
+- Gathering is chunked: keep calling collect until you have enough. Building: build house <size> <block>.
+- Survival first: if it is night and you are hurt, shelter then wait 60. Eat when hungry.
+- Chat: minecraft("say ...") is public in-game chat that the user and the other bots read. Use it to coordinate
+  ({coord}) and to answer people. Messages addressed to you in recent_chat are requests: act on them.
+- come walks to the user. goto x y z walks anywhere. state re-reads the world."""
+
+def mc_prompt(name, bots):
+    others = [b for b in bots if b != name]
+    team = (f"Your teammates {', '.join(others)} are also in the world, each with the same task. Split the work and say what you take, "
+            f"e.g. say(\"{name}: I'll gather dirt, you build\"). Do not all do the same thing.") if others else "You are the only bot."
+    coord = "who gathers, who builds, where to meet" if others else "reporting what you did"
+    return MC_SYSTEM.format(name=name, team=team, coord=coord)
+
+def mc_connect_all(n):
+    """Join n bots to the running world; returns status text."""
+    port = None
+    m = re.search(r"java\s.*?TCP \*:(\d+) \(LISTEN\)", sh("lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -i java"))
+    if not m:
+        return None, "Minecraft is running but the world is not open to LAN (Escape > Open to LAN > Start LAN World)" if overlay({"op": "target", "app": "Minecraft"}) != "not running" or sh("pgrep -x java") != "(no output)" else "Minecraft is not running"
+    port = int(m.group(1)); names = MC_BOT_NAMES[:max(1, min(int(n), len(MC_BOT_NAMES)))]
+    out = []
+    for nm in names: out.append(minecraft(f"connect {port}", bot=nm).split("\n")[0])
+    return names, "\n".join(out)
+
+def minecraft_turn(messages, cfg, emit):
+    """Minecraft mode: the user's prompt goes to every bot; each runs its own agent loop concurrently."""
+    import threading
+    n = int(cfg.get("bots") or 1)
+    names, status = mc_connect_all(n)
+    if not names: emit({"type": "text", "content": status}); return
+    task = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
+    lock = threading.Lock()
+    def bot_emit(name):
+        def e(ev): 
+            with lock: emit(dict(ev, bot=name))
+        return e
+    def run_one(name):
+        hist = MC_SESSIONS.setdefault(name, [])
+        hist.append({"role": "user", "content": task})
+        sub = dict(cfg, tools="minecraft", _bot=name, _bots=names)
+        try: agent(hist, sub, bot_emit(name), system=mc_prompt(name, names), tools=MC_TOOLS)
+        except Exception as ex: bot_emit(name)({"type": "text", "content": f"{name} stopped: {ex}"})
+    threads = [threading.Thread(target=run_one, args=(nm,), daemon=True) for nm in names]
+    for t in threads: t.start()
+    for t in threads: t.join()
+
+def agent(messages, cfg, emit, system=None, tools=None):
+    if not cfg.get("_bot"): TARGET["app"] = ""; overlay({"op": "target", "app": ""})  # every task starts with no app: nothing leaks between turns
     prompt_tools = cfg["model"] in NO_TOOLS
     compact = cfg.get("tools", "compact") != "full"
-    tools = COMPACT_TOOLS if compact else TOOLS
-    system = COMPACT_SYSTEM if compact else SYSTEM
+    if tools is None: tools = COMPACT_TOOLS if compact else TOOLS
+    if system is None: system = COMPACT_SYSTEM if compact else SYSTEM
+    mc_bot = cfg.get("_bot")
     msgs = [{"role": "system", "content": system + (PROMPT_TOOLS if prompt_tools else "")}] + messages
     task = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
     level = str(cfg.get("reasoning") or ("medium" if cfg.get("think") else "none")).lower()
@@ -1066,6 +1128,7 @@ def agent(messages, cfg, emit):
         m.pop("done_reason", None)
         if m.get("thinking"): emit({"type": "thinking", "content": m["thinking"]})
         msgs.append(m)
+        if mc_bot: messages.append({k: v for k, v in m.items() if k != "thinking"})  # keep the bot's own history
         calls = m.get("tool_calls") or []
         if not calls and m.get("content"):
             calls = fake_calls(m["content"])
@@ -1138,6 +1201,7 @@ def agent(messages, cfg, emit):
                 if same_reads >= 3: res += f"\nReminder of the task: {task}"
             else:
                 same_reads = 0
+                if mc_bot and fn["name"] == "minecraft": args = dict(args, _bot=mc_bot)
                 try: res = (compact_call if compact else run_tool)(fn["name"], args, cfg)
                 except Exception as e: res = f"error: {e}"
             last_call = key
@@ -1149,6 +1213,7 @@ def agent(messages, cfg, emit):
             if failed and c is not calls[-1]:
                 msgs.append({"role": "user" if prompt_tools else "tool", "content": (f"[tool result of {fn['name']}]\n" if prompt_tools else "") + res + "\n(the remaining calls in this reply were skipped: fix this first)"}); break
             msgs.append({"role": "user" if prompt_tools else "tool", "content": (f"[tool result of {fn['name']}]\n" if prompt_tools else "") + str(res)})
+            if mc_bot: messages.append(msgs[-1])
     emit({"type": "text", "content": "(stopped: step limit reached)"})
 
 def agent_turn(messages, cfg, emit):
@@ -1160,6 +1225,12 @@ class H(SimpleHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         if self.path == "/": self.path = "/index.html"
+        if self.path == "/api/minecraft":  # status for the menu bar
+            running = sh("pgrep -x java") != "(no output)"
+            lan = re.search(r"java\s.*?TCP \*:(\d+) \(LISTEN\)", sh("lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -i java")) is not None
+            bots = (mcbot({"action": "bots"}).get("result") or {}).get("bots", []) if lan else []
+            body = json.dumps({"running": running, "lan": lan, "bots": bots}).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(body); return
         if self.path == "/api/models":
             try: body = urllib.request.urlopen(OLLAMA + "/api/tags").read()
             except Exception: body = b'{"models":[]}'
@@ -1171,7 +1242,18 @@ class H(SimpleHTTPRequestHandler):
         def emit(ev):  # raises BrokenPipeError when the user hits Stop, which ends the loop
             self.wfile.write((json.dumps(ev) + "\n").encode()); self.wfile.flush()
         try:
-            agent_turn(body["messages"], body.get("cfg", {"model": "qwen2.5:1.5b"}), emit)
+            cfg = body.get("cfg", {"model": "qwen2.5:1.5b"})
+            if self.path == "/api/minecraft":
+                if body.get("reset"): MC_SESSIONS.clear(); emit({"type": "text", "content": "bot conversations reset"})
+                if body.get("disconnect"):
+                    for nm in list(MC_BOT_NAMES): mcbot({"action": "disconnect", "bot": nm})
+                    emit({"type": "text", "content": "bots left the world"})
+                if body.get("enable"):
+                    names, status = mc_connect_all(body.get("bots") or 1)
+                    emit({"type": "text", "content": status})
+                emit({"type": "done"}); return
+            if cfg.get("minecraft"): minecraft_turn(body["messages"], cfg, emit)
+            else: agent_turn(body["messages"], cfg, emit)
             emit({"type": "done"})
         except (BrokenPipeError, ConnectionResetError):
             pass
