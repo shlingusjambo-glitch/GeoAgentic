@@ -747,6 +747,11 @@
               finishWorkCard(work); work = null;
               await streamText(ev.content, container);
               activeChat.messages.push({ role: 'assistant', content: ev.content });
+            } else if (ev.type === 'delta' && work) {
+              // live token stream from the model, shown in the working card until the full reply arrives
+              const lbl = work.querySelector('.work-label');
+              lbl._live = (lbl._live || '') + ev.content;
+              lbl.textContent = lbl._live.slice(-90);
             } else if (ev.type === 'thinking') {
               const t = document.createElement('div');
               t.className = 'fade-token text-[11px] text-neutral-500 italic whitespace-pre-wrap';
