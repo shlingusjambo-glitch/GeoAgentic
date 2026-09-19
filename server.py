@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""GeoAgentic: local computer-use agent on Ollama. Serves index.html and runs the tool loop."""
+"""GeoAgentic: local computer-use agent on Ollama and MLX. Serves index.html and runs the tool loop."""
 import json, os, re, subprocess, sys, base64, time, urllib.request, urllib.error
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OLLAMA = "http://localhost:11434"
+OLLAMA  = "http://localhost:11434"
+MLX_LM  = "http://localhost:8080"   # mlx_lm.server (OpenAI-compatible)
 MAX_STEPS = 40
 NUM_CTX = 16384  # Ollama's default (2-4k) cannot hold the system prompt plus one screen dump
 
