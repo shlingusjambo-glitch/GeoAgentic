@@ -73,6 +73,8 @@ and one or two batches. Never send a lone screen_read/find when you could act.
 - Finder: press_key key="g" mods=["cmd","shift"] to go to a folder path.
 - Spotify / Music / any app with a search box: click the search box, form_input the song or artist, press
   return, then click(text="Play <song>") in the results. Menus never contain songs.
+- Pause / unpause / skip: do not search. The player bar has Button "Play" or "Pause" next to "Previous" and
+  "Next": click it (Button "Play" means it is paused). Or press_key(key="play") without any app.
 
 # Browsers
 browser_read/get_page_text only work with Google Chrome. Search: browser_open("https://www.google.com/search?q=...").
@@ -379,6 +381,8 @@ def run_tool(name, a, cfg):
         b = a.get("browser") or "Google Chrome"
         sh(f'open -g -a {json.dumps(b)} {json.dumps(a["url"])}'); time.sleep(2.5); target(b)
         return run_tool("browser_read" if "Chrome" in b else "screen_read", {}, cfg)
+    if name in ("browser_read", "get_page_text", "browser_js", "browser_back") and TARGET["app"] != "Google Chrome":
+        return f"{name} only works when the opened app is Google Chrome (browser_open(url) opens it). The opened app is {TARGET['app'] or 'nothing'}: use screen_read / click there instead."
     if name == "browser_read":
         t = browser_js(BROWSER_JS); reset_refs("page:" + t.split("\n")[0])
         return clip(annotate(t, from_tree=False, full=True), 8000)
@@ -550,6 +554,7 @@ def agent(messages, cfg, emit):
     budget = REASONING.get(level, 2000)
     think = level != "none"; acted = False; nudges = 0; verified = False
     last_call = None; same_reads = 0; done_calls = {}  # (name, args) -> result, for side-effecting tools
+    call_count = {}; blocked = 0  # loop detection: identical calls anywhere in the turn
     for _ in range(MAX_STEPS):
         if sum(len(m.get("content") or "") for m in msgs) > 24000:  # only then; rewriting history defeats the prefix cache
             tool_idx = [i for i, m in enumerate(msgs) if m.get("role") == "tool" or (m.get("content") or "").startswith("[tool result")]
@@ -622,7 +627,17 @@ def agent(messages, cfg, emit):
                 except Exception: args = {}
             emit({"type": "tool", "name": fn["name"], "args": args})
             key = (fn["name"], json.dumps(args, sort_keys=True))
-            if fn["name"] in ONCE_TOOLS and key in done_calls:
+            call_count[key] = call_count.get(key, 0) + 1
+            if call_count[key] > 2 and fn["name"] not in ("wait", "batch"):
+                blocked += 1
+                if blocked >= 3:
+                    emit({"type": "result", "name": fn["name"], "result": "blocked: repeated call"})
+                    emit({"type": "text", "content": "I got stuck repeating the same actions without progress, so I stopped. "
+                          f"Task: \"{task}\". Tell me how you'd like to proceed."}); return
+                res = (f"blocked: you have already run {fn['name']} with these exact arguments {call_count[key]-1} times this task and it "
+                       "did not get you further. It will not run again. Do something DIFFERENT: read the latest screen and click a control "
+                       "that is actually listed there, or report what is blocking you.")
+            elif fn["name"] in ONCE_TOOLS and key in done_calls:
                 res = f"already executed earlier in this task (result was: {done_calls[key][:200]}). Do not repeat it; continue or give the final report."
             elif fn["name"] in READ_TOOLS and key == last_call:
                 same_reads += 1
