@@ -5,3 +5,4 @@ menubar
 deps/
 mcbot/node_modules/
 mcbot/package-lock.json
+mcbot/board.txt

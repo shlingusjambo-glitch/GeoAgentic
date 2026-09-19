@@ -482,7 +482,13 @@ def ensure_accessible(app, t):
     return f"({app} was relaunched with accessibility enabled)\n" + t
 
 GUI_ACTIONS = {"click", "double_click", "right_click", "hover", "move_mouse", "drag", "form_input", "type_text", "press_key", "scroll", "menu", "hold", "mouse"}
-MC_HELP = "connect | state | come | goto x y z | collect <block> [n] | dig <block> | place <block> [x y z] | craft <item> [n] | equip <item> | build house [size] [block] | eat | shelter (dig in for the night) | wait [seconds] | say <text> | stop"
+MC_HELP = ("state | come | goto x y z | explore <north|south|east|west> [blocks] | scout | find <block|animal|player> | "
+           "collect <block> [n] | dig <block> | place <block> [x y z] | craft <item> [n] | smelt <item> [n] | equip <item> | wear | "
+           "build house <size> [block] | build wall|floor|tower|fence|stairs|bridge <n> [block] | "
+           "attack <animal|mob> [n] | eat | sleep | shelter | wait [s] | "
+           "chest | store <item> [n] | take <item> [n] | give <player> <item> [n] | drop <item> [n] | "
+           "till | plant [seeds] | harvest [crop] | fish | home set | home | use <block> | "
+           "say <text> | tell <player> <text> | board | board <text>")
 # ---------- Minecraft: play as a second player from text state (mcbot/bot.js over HTTP) ----------
 MCBOT = {"proc": None}
 def mcbot(payload):
@@ -516,6 +522,18 @@ def fmt_state(st):
             + ("\nIt is night: hostile mobs are out. If health keeps dropping, minecraft(\"shelter\") and minecraft(\"wait 60\") until day." if st.get("time") == "night" else "")
             + (f"\nchat: {' | '.join(st['recent_chat'])}" if st.get("recent_chat") else ""))
 
+BOARD = os.path.join(HERE, "mcbot", "board.txt")
+def board_op(text, bot):
+    """The town notice board: a shared, persistent text. `board` reads it; `board <text>` appends a signed line;
+    `board clear` wipes it. Rules, jobs, prices, plans: whatever the bots decide to write."""
+    text = text.strip()
+    if text.lower() == "clear": open(BOARD, "w").close(); return "board cleared"
+    if text:
+        with open(BOARD, "a") as f: f.write(f"[{time.strftime('%H:%M')}] {bot or 'user'}: {text}\n")
+    try: lines = open(BOARD).read().strip().split("\n")[-40:]
+    except FileNotFoundError: lines = []
+    return ("posted. " if text else "") + "NOTICE BOARD:\n" + ("\n".join(l for l in lines if l) or "(empty)")
+
 def minecraft(cmd, bot=None):
     """Mini-language: connect [port] | state | come | goto x y z | collect <block> [n] | dig <block> | place <block> [x y z] |
     craft <item> [n] | equip <item> | build house [size] [block] | say <text> | stop. `bot` addresses one of several bots."""
@@ -523,7 +541,9 @@ def minecraft(cmd, bot=None):
     if re.fullmatch(r"\w+(,\s*\w+\s*[:=]\s*[^,]+)+", cmd):  # "collect,block:oak_log,n:5" -> "collect oak_log 5"
         cmd = " ".join(p.split(":")[-1].strip() for p in cmd.split(",") if p.strip())
     verbs = ("connect", "state", "look", "where", "status", "come", "follow", "goto", "go", "collect", "gather", "mine", "dig", "place",
-             "craft", "equip", "hold", "build", "say", "chat", "stop", "eat", "shelter", "wait")
+             "craft", "equip", "hold", "build", "say", "chat", "stop", "eat", "shelter", "wait", "attack", "hunt", "kill", "chest", "store",
+             "take", "give", "drop", "smelt", "cook", "till", "plant", "harvest", "sleep", "wake", "explore", "scout", "find", "use",
+             "wear", "fish", "home", "tell", "whisper", "board", "note", "players", "disconnect")
     w = cmd.split(); a = (w[0].lower() if w else "state"); rest = w[1:]
     if a not in verbs:
         if re.match(r"^\w+:", cmd) or len(w) > 3: a, rest = "say", w  # "Geo: I'll gather logs" is chat
@@ -546,9 +566,35 @@ def minecraft(cmd, bot=None):
     elif a == "craft": q = {"action": "craft", "item": rest[0] if rest else "", "count": int(num(1, 1))}
     elif a in ("equip", "hold"): q = {"action": "equip", "item": rest[0] if rest else ""}
     elif a == "build":
-        nums = [x for x in rest if x.replace(".", "").isdigit()]; words = [x for x in rest if not x.replace(".", "").isdigit() and x != "house"]
-        q = {"action": "build_house", "size": int(float(nums[0])) if nums else 5, "block": words[0] if words else None}
+        shape = rest[0].lower() if rest and not rest[0].replace(".", "").isdigit() else "house"
+        nums = [x for x in rest if x.replace(".", "").isdigit()]; words = [x for x in rest[1:] if not x.replace(".", "").isdigit()] if rest else []
+        if shape in ("house", "room"): q = {"action": "build_house", "size": int(float(nums[0])) if nums else 5, "height": int(float(nums[1])) if len(nums) > 1 else 3, "block": words[0] if words else None}
+        else: q = {"action": "build_shape", "shape": shape, "a1": float(nums[0]) if nums else None, "a2": float(nums[1]) if len(nums) > 1 else None, "block": words[0] if words else None}
     elif a in ("say", "chat"): q = {"action": "chat", "text": " ".join(rest)}
+    elif a in ("attack", "hunt", "kill"): q = {"action": "attack", "target": rest[0] if rest else "", "count": int(num(1, 1))}
+    elif a == "chest": q = {"action": "chest"}
+    elif a == "store": q = {"action": "store", "item": rest[0] if rest else "all", "count": int(num(1, 0))}
+    elif a == "take": q = {"action": "take", "item": rest[0] if rest else "", "count": int(num(1, 0))}
+    elif a == "give": q = {"action": "give", "who": rest[0] if rest else "", "item": rest[1] if len(rest) > 1 else "", "count": int(num(2, 0))}
+    elif a == "drop": q = {"action": "drop", "item": rest[0] if rest else "", "count": int(num(1, 0))}
+    elif a in ("smelt", "cook"): q = {"action": "smelt", "item": rest[0] if rest else "", "count": int(num(1, 1))}
+    elif a == "till": q = {"action": "till"}
+    elif a == "plant": q = {"action": "plant", "item": rest[0] if rest else "wheat_seeds"}
+    elif a == "harvest": q = {"action": "harvest", "item": rest[0] if rest else "wheat"}
+    elif a == "sleep": q = {"action": "sleep"}
+    elif a == "wake": q = {"action": "wake"}
+    elif a == "explore": q = {"action": "explore", "direction": rest[0] if rest and not rest[0].isdigit() else None, "distance": num(1, None) or num(0, 24)}
+    elif a == "scout": q = {"action": "scout"}
+    elif a == "find": q = {"action": "find", "target": rest[0] if rest else ""}
+    elif a == "use": q = {"action": "use", "target": rest[0] if rest else None}
+    elif a == "wear": q = {"action": "wear"}
+    elif a == "fish": q = {"action": "fish"}
+    elif a == "home": q = {"action": "home", "set": bool(rest and rest[0] == "set")}
+    elif a in ("tell", "whisper"): q = {"action": "whisper", "who": rest[0] if rest else "", "text": " ".join(rest[1:])}
+    elif a in ("board", "note"):
+        return board_op(" ".join(rest), bot)
+    elif a == "players": q = {"action": "state"}
+    elif a == "disconnect": q = {"action": "disconnect"}
     elif a == "eat": q = {"action": "eat"}
     elif a == "shelter": q = {"action": "shelter"}
     elif a == "wait": q = {"action": "wait", "seconds": num(0, 30)}
@@ -1027,40 +1073,36 @@ MC_TOOLS = [
     T("minecraft", "Act in the world. action: " + MC_HELP + ". Every result includes your position, inventory, surroundings and recent chat.", {"action": S}, ["action"]),
     T("done", "Finish this task with a one-sentence report.", {"result": S}, ["result"]),
 ]
-MC_SYSTEM = """You are {name}, a player in the user's Minecraft survival world, controlled through the minecraft tool. You act
+MC_SYSTEM = """You are {name}, one of the players in the user's Minecraft survival world, acting through the minecraft tool. You act
 from TEXT: every result shows your position, health, food, inventory, nearby blocks, entities and recent chat.
 {team}
-Rules
-- Act with tool calls until the task is done, then call done(result). Keep reasoning short.
-- A result that starts with "error" means that action did NOT happen. Never assume success; read every result.
-- Materials: use what the state lists nearby. Dirt is always available. Stone and ores need a pickaxe. Read the
-  suggestion in every error and follow it (e.g. "collect dirt 33").
-- Gathering is chunked: keep calling collect until you have enough. Building: build house <size> <block>.
-- Survival first: if it is night and you are hurt, shelter then wait 60. Eat when hungry.
-- Chat: minecraft("say ...") is public in-game chat that the user and the other bots read. Use it to coordinate
-  ({coord}) and to answer people. Messages addressed to you in recent_chat are requests: act on them.
-- come walks to the user. goto x y z walks anywhere. state re-reads the world.
-- Talking is not working. Say things that matter (a need, a location, a finished step), then ACT. Never repeat
-  an announcement. A round with only chat achieves nothing and done will be refused.
 
-Survival playbook (in order; skip what is done): logs (collect oak_log 8, or any *_log) -> craft crafting_table ->
-craft stick -> craft wooden_pickaxe -> collect stone 20 -> craft stone_pickaxe, stone_axe, stone_sword -> a shelter
-before night (build house 4 <block>) -> food (kill animals: goto them; or collect wheat/apples) -> coal_ore, iron_ore ->
-craft furnace, iron tools. Do not gather endlessly: gather what the next step needs, then do the next step."""
+How to act
+- Do things with tool calls; call done(result) when the current step is finished (you will get another round).
+- A result starting with "error" means the action did NOT happen; read the hint in it. Never assume success.
+- Use materials the state lists nearby. Dirt is always there. Stone and ores need a pickaxe.
+- Gathering is chunked: keep calling collect until you have enough. Errors tell you the exact next command.
+- Survival: eat when hungry, shelter (or sleep in a bed) at night if hurt, wear armor when you have it.
 
-MC_ROLES = ["wood and tools: gather logs, craft the crafting table, sticks and pickaxes, then stone tools for everyone",
-            "shelter and building: gather dirt or cobblestone and build the house before night, then expand it",
-            "food and scouting: find and kill animals (goto them), collect apples/wheat, report what is around",
-            "mining: with a pickaxe from the tool-maker, mine stone, coal and iron and bring it back",
-            "farming and wood supply: collect logs and saplings, keep the team stocked with planks",
-            "defense: craft a sword, stay near the builder and fight mobs"]
+Talking
+- say <text> is public chat: the user and the other players read it. tell <player> <text> is private.
+- board shows the notice board; board <text> posts on it. It persists: use it for plans, rules, jobs, prices,
+  claims ("Ada owns the farm"), or anything the group wants to remember.
+- Talk when it matters: a need, a location, a finished step, a proposal, a disagreement. Do not repeat yourself.
+
+You are free people in this world. The survival basics are a starting point, not a script: logs -> crafting_table
+-> stick -> wooden_pickaxe -> stone tools -> shelter -> food -> coal/iron -> furnace -> iron tools -> beds ->
+farms. Beyond that, decide together what you want: a town, roads, a trading post, jobs, currency (items are
+tradeable with give), laws on the board, exploring, mining for diamonds, fighting the dragon. Propose, argue,
+agree, and then build it."""
+
 def mc_role(name, bots): return MC_ROLES[bots.index(name) % len(MC_ROLES)] if name in bots else MC_ROLES[0]
 def mc_prompt(name, bots):
     others = [b for b in bots if b != name]
-    team = ("Roles are already assigned; do not renegotiate them. Yours: " + mc_role(name, bots) + ". Teammates: " +
-            "; ".join(f"{o} ({mc_role(o, bots).split(':')[0]})" for o in others) + ".") if others else "You are the only bot: do everything, in playbook order."
-    coord = "progress, needs (\"I need a pickaxe\"), where things are" if others else "reporting what you did"
-    return MC_SYSTEM.format(name=name, team=team, coord=coord)
+    team = ("The other players are " + ", ".join(others) + ". Starting jobs, so nobody duplicates work at first: yours is " +
+            mc_role(name, bots) + "; " + "; ".join(f"{o}: {mc_role(o, bots).split(':')[0]}" for o in others) +
+            ". Jobs can change: agree changes in chat or on the board.") if others else "You are alone for now: do everything yourself, in the basic order."
+    return MC_SYSTEM.format(name=name, team=team)
 
 def mc_connect_all(n):
     """Join n bots to the running world; returns status text."""
@@ -1089,7 +1131,7 @@ def minecraft_turn(messages, cfg, emit):
         hist = MC_SESSIONS.setdefault(name, [])
         hist.append({"role": "user", "content": task})
         sub = dict(cfg, tools="minecraft", _bot=name, _bots=names)
-        if len(names) > 1: minecraft(f"say {name}: on it. My job: {mc_role(name, names).split(':')[0]}.", bot=name)  # the harness announces roles
+        if len(names) > 1: minecraft(f"say {name}: on it. Starting job: {mc_role(name, names).split(':')[0]}.", bot=name)  # the harness announces starting jobs
         # A Minecraft task is a standing objective: when the bot finishes a step it gets the next round, until the
         # user presses Stop (the connection closes) or the round limit is hit.
         for rnd in range(MC_ROUNDS):
@@ -1100,8 +1142,8 @@ def minecraft_turn(messages, cfg, emit):
             if last: minecraft(f"say {name}: {last[:100]}", bot=name)  # the report goes to the team and the user in-game
             if len(hist) > 40: del hist[1:-24]  # keep the context small over a long session
             time.sleep(3)
-            hist.append({"role": "user", "content": f"[round {rnd + 2}] Keep going toward: \"{task}\". Read the latest chat, check state, then do the next "
-                                                    "useful step (playbook order). Coordinate with teammates in chat. Call done when this step is finished."})
+            hist.append({"role": "user", "content": f"[round {rnd + 2}] Objective: \"{task}\". Read the latest chat (and the board now and then), check state, "
+                                                    "then do what you think is most useful next. Call done when that step is finished."})
     threads = [threading.Thread(target=run_one, args=(nm,), daemon=True) for nm in names]
     for t in threads: t.start()
     for t in threads: t.join()
@@ -1122,6 +1164,7 @@ def agent(messages, cfg, emit, system=None, tools=None):
     call_count = {}; blocked = 0  # loop detection: identical calls anywhere in the turn
     fails = 0  # consecutive failed actions
     worked = False  # a real (non-chat, non-read) action succeeded this turn
+    talked = False  # said or posted something new (a discussion is a legitimate round)
     for _ in range(MAX_STEPS):
         if sum(len(m.get("content") or "") for m in msgs) > 24000:  # only then; rewriting history defeats the prefix cache
             tool_idx = [i for i, m in enumerate(msgs) if m.get("role") == "tool" or (m.get("content") or "").startswith("[tool result")]
@@ -1197,9 +1240,9 @@ def agent(messages, cfg, emit, system=None, tools=None):
                 continue
             # Small models like to declare victory after merely navigating to the right place. Make them check the
             # evidence once before the report is accepted.
-            if mc_bot and text and not worked and nudges < 2:
+            if mc_bot and text and not worked and not talked and nudges < 2:
                 nudges += 1
-                msgs.append({"role": "user", "content": "[system] That was talk, not work. Do the next real action now (collect/craft/build/goto), then report."}); continue
+                msgs.append({"role": "user", "content": "[system] Nothing happened: that reply reached nobody. Either act (tool call) or say it in chat (minecraft say ...)."}); continue
             if acted and text and not verified:
                 verified = True
                 msgs.append({"role": "user", "content": f"[system] Verify before finishing. Task: \"{task}\". Does the LATEST screen prove it is done (the right control shows (selected)/on, the window or text you wanted is there)? If not, continue with tool calls. If it is proven, call done" + ("." if compact else " (reply with your short report).")})
@@ -1219,9 +1262,9 @@ def agent(messages, cfg, emit, system=None, tools=None):
                 try: args = json.loads(args)
                 except Exception: args = {}
             if fn["name"] == "done":  # explicit finish: no nudges, no verification loop
-                if mc_bot and not worked:
+                if mc_bot and not worked and not talked:
                     emit({"type": "tool", "name": "done", "args": args})
-                    res = "refused: you have not done any work this round, only talked or looked. Do a real action first (collect, craft, build, goto, dig, place)."
+                    res = "refused: nothing happened this round (no action, no new message). Do something real, or say something new to the others."
                     emit({"type": "result", "name": "done", "result": res})
                     msgs.append({"role": "user" if prompt_tools else "tool", "content": (f"[tool result of done]\n" if prompt_tools else "") + res}); continue
                 if fails >= 2:
@@ -1270,7 +1313,8 @@ def agent(messages, cfg, emit, system=None, tools=None):
             last_call = key
             failed = res.startswith(("error", "nothing typed", "no target app", "refused", "blocked", "No app called", "unknown"))
             fails = fails + 1 if failed else 0
-            if not failed and fn["name"] not in READ_TOOLS and not res.startswith(("said:", "not sent", "me:")): worked = True
+            if not failed and fn["name"] not in READ_TOOLS and not res.startswith(("said:", "not sent", "me:", "posted.", "NOTICE", "whispered")): worked = True
+            if res.startswith(("said:", "posted.", "whispered")): talked = True
             if fn["name"] in ONCE_TOOLS and key not in done_calls and not failed and not re.search(r"did not start|not a folder|no such file|no \.app|copy failed|No app called", res): done_calls[key] = res
             if c is not calls[-1] and "\n" in res and not failed and fn["name"] in GUI_ACTIONS:
                 res = res.split("\n")[0]  # intermediate actions: status only; reads, opens and the last call keep their screen
@@ -1309,6 +1353,7 @@ class H(SimpleHTTPRequestHandler):
         try:
             cfg = body.get("cfg", {"model": "qwen2.5:1.5b"})
             if self.path == "/api/minecraft":
+                if body.get("board") is not None: emit({"type": "text", "content": board_op(body["board"], None)})
                 if body.get("reset"): MC_SESSIONS.clear(); emit({"type": "text", "content": "bot conversations reset"})
                 if body.get("disconnect"):
                     for nm in list(MC_BOT_NAMES): mcbot({"action": "disconnect", "bot": nm})
