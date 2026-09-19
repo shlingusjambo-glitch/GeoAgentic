@@ -550,6 +550,44 @@ func handle(_ c: [String: Any]) -> String {
         }
         guard let (id, r) = best else { return "none" }
         return "\(id) \(Int(r.minX)) \(Int(r.minY)) \(Int(r.width)) \(Int(r.height))"
+    case "hold":  // hold one or more keys for a while (walking, sprinting, jumping)
+        _ = yieldToUser(); if sysMode { sysActivate() }
+        let names = (c["keys"] as? [String] ?? []).map { $0.lowercased() }
+        let secs = min(c["seconds"] as? Double ?? 1, 15)
+        var codes: [CGKeyCode] = []; var flags: CGEventFlags = []
+        for n in names {
+            switch n { case "shift": flags.insert(.maskShift); case "ctrl", "control": flags.insert(.maskControl)
+                       case "cmd", "command": flags.insert(.maskCommand); case "alt", "option": flags.insert(.maskAlternate)
+                       default: if let k = keyCode(n) { codes.append(k) } }
+        }
+        if codes.isEmpty && flags.isEmpty { return "unknown key" }
+        for k in codes { let e = CGEvent(keyboardEventSource: nil, virtualKey: k, keyDown: true); e?.flags = flags; send(e) }
+        let end = Date(timeIntervalSinceNow: secs)
+        while Date() < end {  // games want key repeat while held
+            frame(0.05)
+            for k in codes { let e = CGEvent(keyboardEventSource: nil, virtualKey: k, keyDown: true); e?.flags = flags; e?.setIntegerValueField(.keyboardEventAutorepeat, value: 1); send(e) }
+        }
+        for k in codes { let e = CGEvent(keyboardEventSource: nil, virtualKey: k, keyDown: false); e?.flags = flags; send(e) }
+    case "mousemove":  // relative mouse motion (camera look in games with a captured cursor)
+        _ = yieldToUser(); if sysMode { sysActivate() }
+        let dx = c["dx"] as? Double ?? 0, dy = c["dy"] as? Double ?? 0
+        let steps = max(8, Int(max(abs(dx), abs(dy)) / 12))
+        for _ in 0..<steps {
+            let e = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: pos, mouseButton: .left)
+            e?.setDoubleValueField(.mouseEventDeltaX, value: dx / Double(steps))
+            e?.setDoubleValueField(.mouseEventDeltaY, value: dy / Double(steps))
+            send(e); frame(0.012)
+        }
+    case "mousehold":  // hold a mouse button (mining, charging a bow, dragging)
+        _ = yieldToUser(); if sysMode { sysActivate() }
+        let right = c["button"] as? String == "right"
+        let secs = min(c["seconds"] as? Double ?? 1, 15)
+        let btn: CGMouseButton = right ? .right : .left
+        if sysMode { CGWarpMouseCursorPosition(pos) }
+        send(CGEvent(mouseEventSource: nil, mouseType: right ? .rightMouseDown : .leftMouseDown, mouseCursorPosition: pos, mouseButton: btn))
+        let end = Date(timeIntervalSinceNow: secs)
+        while Date() < end { frame(0.05); send(CGEvent(mouseEventSource: nil, mouseType: right ? .rightMouseDragged : .leftMouseDragged, mouseCursorPosition: pos, mouseButton: btn)) }
+        send(CGEvent(mouseEventSource: nil, mouseType: right ? .rightMouseUp : .leftMouseUp, mouseCursorPosition: pos, mouseButton: btn))
     case "sysmode":
         sysMode = c["on"] as? Bool ?? false
     case "state":

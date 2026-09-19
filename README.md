@@ -21,5 +21,10 @@ screenshots the window and clicks by position. Grant **Accessibility** (and **Sc
 screenshots) to the terminal you launch from. For `browser_read`, enable Chrome
 *View > Developer > Allow JavaScript from Apple Events*.
 
+**Minecraft.** The agent can play Java Edition as its own player in your world, from text (position, inventory,
+nearby blocks) rather than screenshots, in the style of the Vals AI Minecraft benchmark: run `mcbot/setup.sh` once,
+open your world to LAN (Escape > Open to LAN > Start LAN World), then ask it to gather, craft, build a house, or come
+to you. It eats, fights back, and digs in for the night on its own.
+
 Files: `server.py` (agent loop + tools), `overlay.swift` (cursor overlay, input injection, AX tree),
 `menubar.swift` (menu bar companion), `index.html` (browser UI), `static/` (cursor images).

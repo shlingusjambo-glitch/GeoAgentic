@@ -2,3 +2,6 @@ overlay
 __pycache__/
 .DS_Store
 menubar
+deps/
+mcbot/node_modules/
+mcbot/package-lock.json
