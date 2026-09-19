@@ -182,6 +182,21 @@ stopBtn.target = actions; stopBtn.action = #selector(Actions.stop(_:))
 newChatBtn.target = actions; newChatBtn.action = #selector(Actions.newChat(_:))
 statusItem.button?.target = actions; statusItem.button?.action = #selector(Actions.toggle(_:))
 
+// Also quit on our own if the server disappears (e.g. the terminal was force-closed), so a visible icon always
+// means a live, current server.
+var missed = 0
+Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
+    guard let url = URL(string: SERVER + "/api/models") else { return }
+    var req = URLRequest(url: url); req.timeoutInterval = 2
+    URLSession.shared.dataTask(with: req) { _, resp, err in
+        if err != nil || (resp as? HTTPURLResponse)?.statusCode != 200 { missed += 1; if missed >= 3 { DispatchQueue.main.async { app.terminate(nil) } } }
+        else { missed = 0 }
+    }.resume()
+}
+// Ctrl-C in the terminal reaches us too when launched from run.sh; the server also terminates us explicitly.
+signal(SIGTERM) { _ in exit(0) }
+signal(SIGINT) { _ in exit(0) }
+
 setPhase(.idle)
 loadModels()
 app.run()

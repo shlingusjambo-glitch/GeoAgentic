@@ -1055,7 +1055,17 @@ class H(SimpleHTTPRequestHandler):
             pass
 
 if __name__ == "__main__":
+    import atexit, signal
     overlay({"op": "hide"})
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    # The menu bar companion lives and dies with this server: when the terminal goes, so does the icon.
+    sh("pkill -x menubar")
+    menubar = subprocess.Popen([os.path.join(HERE, "menubar")]) if os.path.exists(os.path.join(HERE, "menubar")) else None
+    def shutdown(*_):
+        for p in (menubar, _ov):
+            if p and p.poll() is None: p.terminate()
+        os._exit(0)
+    atexit.register(shutdown)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP): signal.signal(sig, shutdown)
     print(f"GeoAgentic at http://localhost:{port}")
     ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
